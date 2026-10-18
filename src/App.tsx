@@ -1785,7 +1785,10 @@ function CollectionPage() {
                   <TableCell>{movie.releaseYear || '—'}</TableCell>
                   <TableCell>{edition ? `${formatLabel(edition.formatId)} · ${edition.editionYear || 'Year n/a'}` : 'No edition'}</TableCell>
                   <TableCell>{edition?.barcode || '—'}</TableCell>
-                  <TableCell>{movie.favorite ? 'Favorite' : movie.watchedStatus || 'unwatched'}</TableCell>
+                  <TableCell>
+                    {movie.favorite ? 'Favorite' : movie.watchedStatus || 'unwatched'}
+                    {movie.watchedDate ? ` · ${movie.watchedDate}` : ''}
+                  </TableCell>
                   <TableCell align="right">
                     <Button
                       size="small"
@@ -1862,6 +1865,7 @@ function CollectionMobileCards({ rows, isLoading, loadError, onSelect }: {
               <Stack spacing={0.75} sx={{ mt: 1.5 }}>
                 <Typography variant="body2">
                   {movie.releaseYear || 'Year unavailable'} · {movie.watchedStatus || 'unwatched'}
+                  {movie.watchedDate ? ` · Watched: ${movie.watchedDate}` : ''}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
                   {(movie.genres || []).map((genre) => genre.name).join(', ') || 'No genre'}
