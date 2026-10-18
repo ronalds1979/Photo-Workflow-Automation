@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Movie {
+  id                 Int      @id @default(autoincrement())
+  title              String
+  originalTitle      String?
+  alternativeTitle   String?
+  releaseYear        Int?
+  releaseDate        String?
+  countryId          String?
+  durationMinutes    Int?
+  synopsis           String?
+  originalLanguageId String?
+  ageRating          String?
+  personalRating     Int?
+  favorite           Boolean  @default(false)
+  watchedStatus      String?  @default("unwatched")
+  watchedDate        String?
+  rewatchFlag        Boolean  @default(false)
+  notes              String?
+  posterPath         String?
+  imdbId             String?
+  tmdbId             String?
+  imdbUrl            String?
+  tmdbUrl            String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  editions           Edition[]
+  genres             Genre[]
+}
+
+model Genre {
+  id      String  @id
+  name    String
+  movies  Movie[]
+}
+
+model Edition {
+  id               Int      @id @default(autoincrement())
+  movieId          Int
+  formatId         String?
+  editionTypeId    String?
+  movieVersionId   String?
+  distributorId    String?
+  countryEditionId String?
+  editionYear      Int?
+  region           String?
+  barcode          String?
+  catalogNumber    String?
+  steelbook        Boolean  @default(false)
+  slipcover        Boolean  @default(false)
+  digibook         Boolean  @default(false)
+  booklet          Boolean  @default(false)
+  posterIncluded   Boolean  @default(false)
+  discCount        Int?
+  condition        String?
+  purchaseDate     String?
+  purchasePrice    Float?
+  estimatedValue   Float?
+  locationId       String?
+  collectionId     String?
+  frontCoverPath   String?
+  backCoverPath    String?
+  spineImagePath   String?
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  movie            Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+}

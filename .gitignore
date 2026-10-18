@@ -1,0 +1,6 @@
+node_modules/
+dist/
+uploads/
+film_catalog.db
+prisma/film_catalog.db
+.env
