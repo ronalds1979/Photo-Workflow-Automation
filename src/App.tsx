@@ -133,7 +133,6 @@ const regionOptions = ['Region 0 / All', 'Region 1', 'Region 2', 'Region 3', 'Re
 const pendingCoversStorageKey = 'film-collection-pending-covers';
 const pendingCoverDatabaseName = 'film-collection-intake';
 const pendingCoverStoreName = 'pending-covers';
-
 type Summary = {
   totalMovies: number;
   totalEditions: number;
@@ -424,6 +423,7 @@ const emptyMovieForm = {
   favorite: false,
   genreIds: [] as string[],
   watchedStatus: 'unwatched',
+  watchedDate: '', // Added watched date field 18/10/2026
   formatId: 'FMT01',
   editionTypeId: 'ED01',
   movieVersionId: '',
@@ -725,6 +725,7 @@ function AddMoviePage() {
           notes: movie.notes || '',
           favorite: Boolean(movie.favorite),
           watchedStatus: movie.watchedStatus || 'unwatched',
+          watchedDate: movie.watchedDate || '',
           genreIds: (movie.genres || []).map((genre) => genre.id),
           formatId: edition.formatId || '',
           editionTypeId: edition.editionTypeId || '',
@@ -1499,6 +1500,16 @@ function AddMoviePage() {
             </Grid>
             <Grid item xs={12}>
               <TextField fullWidth multiline minRows={2} label="Edition notes" value={form.editionNotes} onChange={(event) => updateForm('editionNotes', event.target.value)} />
+            </Grid>
+            <Grid item xs={12} md={4}>
+              <TextField
+                fullWidth
+                type="date"
+                label="Watched date"
+                InputLabelProps={{ shrink: true }}
+                value={form.watchedDate}
+                onChange={(event) => updateForm('watchedDate', event.target.value)}
+              />
             </Grid>
           </Grid>
 
