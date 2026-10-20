@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import { createWorker, PSM } from 'tesseract.js';
-import {
+import zxing from '@zxing/library';
+const {
   BinaryBitmap,
   Code128Reader,
   Code39Reader,
@@ -8,7 +9,7 @@ import {
   HybridBinarizer,
   ITFReader,
   RGBLuminanceSource,
-} from '@zxing/library';
+} = zxing;
 
 let workerPromise;
 
@@ -24,8 +25,8 @@ const getWorker = () => {
   return workerPromise;
 };
 
-export const preprocessBarcodeImage = async (imagePath) => {
-  const image = sharp(imagePath, { failOn: 'error' })
+export const preprocessBarcodeImage = async (imageBuffer) => {
+  const image = sharp(imageBuffer, { failOn: 'error' })
     .rotate()
     .resize({
       width: 2400,
@@ -42,14 +43,14 @@ export const preprocessBarcodeImage = async (imagePath) => {
   return image.toBuffer();
 };
 
-export const detectBarcode = async (imagePath) => {
+export const detectBarcode = async (imageBuffer) => {
   const readers = [
     EAN13Reader,
     Code128Reader,
     Code39Reader,
     ITFReader,
   ];
-  const orientedImage = await sharp(imagePath, { failOn: 'error' })
+  const orientedImage = await sharp(imageBuffer, { failOn: 'error' })
     .rotate()
     .resize({ width: 4000, height: 3200, fit: 'inside', withoutEnlargement: true })
     .png()
@@ -85,8 +86,8 @@ export const detectBarcode = async (imagePath) => {
   return null;
 };
 
-export const recognizeBarcode = async (imagePath) => {
-  const detectedBarcode = await detectBarcode(imagePath);
+export const recognizeBarcode = async (imageBuffer) => {
+  const detectedBarcode = await detectBarcode(imageBuffer);
   if (detectedBarcode) {
     return {
       barcode: detectedBarcode.value,
@@ -96,7 +97,7 @@ export const recognizeBarcode = async (imagePath) => {
     };
   }
 
-  const processedImage = await preprocessBarcodeImage(imagePath);
+  const processedImage = await preprocessBarcodeImage(imageBuffer);
   const worker = await getWorker();
   const { data } = await worker.recognize(processedImage);
   const barcode = extractBarcodeCandidates(data.text || '')[0] || '';
