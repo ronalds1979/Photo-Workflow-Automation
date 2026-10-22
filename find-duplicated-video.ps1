@@ -9,7 +9,7 @@ $DriveRoot = "D:\"
 $QuarantineFolder = "D:\DuplicateVideosFound"
 
 # Create quarantine folder if missing
-if (!(Test-Path $QuarantineFolder)) {
+if (!(Test-Path -LiteralPath $QuarantineFolder)) {
     New-Item -ItemType Directory -Path $QuarantineFolder | Out-Null
 }
 
@@ -34,7 +34,7 @@ Write-Host ""
 
 # Read all video files once
 $AllVideos = Get-ChildItem `
-    -Path $DriveRoot `
+    -LiteralPath $DriveRoot `
     -File `
     -Recurse `
     -ErrorAction SilentlyContinue |
@@ -45,8 +45,8 @@ $AllVideos = Get-ChildItem `
 Write-Host "Found $($AllVideos.Count) video files."
 Write-Host ""
 
-# Group by filename
-$VideosByName = $AllVideos | Group-Object Name
+# Group by filename - using AsHashTable for O(1) lookups
+$VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
 
 # Only videos inside the folder being cleaned
 $VideosToCheck = $AllVideos | Where-Object {
@@ -60,9 +60,8 @@ foreach ($Video in $VideosToCheck) {
 
     Write-Host "Checking: $($Video.Name)"
 
-    $Candidates = $VideosByName |
-        Where-Object { $_.Name -eq $Video.Name } |
-        Select-Object -ExpandProperty Group |
+    # O(1) hash map lookup instead of O(N) array filtering
+    $Candidates = $VideosByName[$Video.Name] |
         Where-Object { $_.FullName -ne $Video.FullName }
 
     foreach ($Candidate in $Candidates) {
@@ -74,8 +73,8 @@ foreach ($Video in $VideosToCheck) {
 
         try {
 
-            $Hash1 = (Get-FileHash -Path $Video.FullName -Algorithm SHA256).Hash
-            $Hash2 = (Get-FileHash -Path $Candidate.FullName -Algorithm SHA256).Hash
+            $Hash1 = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256).Hash
+            $Hash2 = (Get-FileHash -LiteralPath $Candidate.FullName -Algorithm SHA256).Hash
 
             if ($Hash1 -eq $Hash2) {
 
@@ -88,7 +87,7 @@ foreach ($Video in $VideosToCheck) {
                 $Destination = Join-Path $QuarantineFolder $Video.Name
 
                 # Prevent filename collisions
-                if (Test-Path $Destination) {
+                if (Test-Path -LiteralPath $Destination) {
 
                     $BaseName = [SystemIO.Path]::GetFileNameWithoutExtension($Video.Name)
                     $Extension = [System.IO.Path]::GetExtension($Video.Name)
@@ -99,7 +98,7 @@ foreach ($Video in $VideosToCheck) {
                 }
 
                 Move-Item `
-                    -Path $Video.FullName `
+                    -LiteralPath $Video.FullName `
                     -Destination $Destination `
                     -Force
 
