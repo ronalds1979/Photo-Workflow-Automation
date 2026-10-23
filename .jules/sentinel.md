@@ -1,0 +1,4 @@
+## 2024-10-23 - [Wildcard Injection in PowerShell Cmdlets]
+**Vulnerability:** PowerShell cmdlets like `Get-ChildItem`, `Test-Path`, `Get-FileHash`, and `Move-Item` default to evaluating the `-Path` argument as a wildcard pattern. This can lead to wildcard injection vulnerabilities or unexpected behavior when unvalidated or arbitrary file paths contain characters like `[ ]`.
+**Learning:** This repo contains utility scripts for scanning and moving arbitrary files, which may have characters like `[` or `]` in their names. Using `-Path` with these filenames can cause the cmdlets to fail or behave unexpectedly.
+**Prevention:** Always use the `-LiteralPath` parameter instead of `-Path` for path-based cmdlets when handling file paths that you didn't explicitly construct as wildcard patterns.
