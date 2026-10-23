@@ -46,7 +46,8 @@ Write-Host "Found $($AllVideos.Count) video files."
 Write-Host ""
 
 # Group by filename
-$VideosByName = $AllVideos | Group-Object Name
+# O(1) hash table lookup optimization to replace O(n) Array filtering later
+$VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
 
 # Only videos inside the folder being cleaned
 $VideosToCheck = $AllVideos | Where-Object {
@@ -60,9 +61,7 @@ foreach ($Video in $VideosToCheck) {
 
     Write-Host "Checking: $($Video.Name)"
 
-    $Candidates = $VideosByName |
-        Where-Object { $_.Name -eq $Video.Name } |
-        Select-Object -ExpandProperty Group |
+    $Candidates = $VideosByName[$Video.Name] |
         Where-Object { $_.FullName -ne $Video.FullName }
 
     foreach ($Candidate in $Candidates) {
