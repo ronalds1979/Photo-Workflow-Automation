@@ -1,0 +1,3 @@
+## 2026-10-24 - PowerShell Group-Object Performance Anti-Pattern
+**Learning:** Found a severe O(N²) performance bottleneck in `find-duplicated-video.ps1`. The script was grouping large collections of files using `Group-Object Name` (which returns an array of `GroupInfo` objects) and then filtering that array inside a loop using `Where-Object { $_.Name -eq ... }`. `Where-Object` is notoriously slow in PowerShell, and doing this in a loop across thousands of files causes execution time to scale quadratically.
+**Action:** Always use `Group-Object -AsHashTable -AsString` when creating lookup tables in PowerShell. This returns a native `.NET` `Hashtable` allowing for O(1) direct key lookups (`$HashTable[$Key]`), drastically reducing execution time for large datasets.
