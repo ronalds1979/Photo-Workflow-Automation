@@ -1,0 +1,4 @@
+## 2024-10-24 - [PowerShell Path Wildcard Injection]
+**Vulnerability:** PowerShell scripts used `-Path` instead of `-LiteralPath` for cmdlets handling arbitrary file paths (like `Get-ChildItem`, `Test-Path`, `Get-FileHash`, `Move-Item`).
+**Learning:** In PowerShell, `-Path` treats certain characters like brackets (`[`, `]`) as wildcards, potentially leading to script failure or path wildcard injection if a user handles a maliciously or unusually named file.
+**Prevention:** Default to using `-LiteralPath` for all path-based cmdlets to ensure the path is treated exactly as provided without expanding wildcards.
