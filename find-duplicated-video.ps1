@@ -46,7 +46,8 @@ Write-Host "Found $($AllVideos.Count) video files."
 Write-Host ""
 
 # Group by filename
-$VideosByName = $AllVideos | Group-Object Name
+# ⚡ Bolt: Use -AsHashTable -AsString to create an O(1) lookup table instead of an array of GroupInfo objects
+$VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
 
 # Only videos inside the folder being cleaned
 $VideosToCheck = $AllVideos | Where-Object {
@@ -60,9 +61,8 @@ foreach ($Video in $VideosToCheck) {
 
     Write-Host "Checking: $($Video.Name)"
 
-    $Candidates = $VideosByName |
-        Where-Object { $_.Name -eq $Video.Name } |
-        Select-Object -ExpandProperty Group |
+    # ⚡ Bolt: Direct O(1) hash table lookup avoids O(N^2) complexity of piping Where-Object over GroupInfo objects
+    $Candidates = $VideosByName[$Video.Name] |
         Where-Object { $_.FullName -ne $Video.FullName }
 
     foreach ($Candidate in $Candidates) {
