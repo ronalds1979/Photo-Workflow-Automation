@@ -1,0 +1,3 @@
+## 2024-05-24 - [PowerShell Group-Object O(N^2) Anti-Pattern]
+**Learning:** In PowerShell, filtering the resulting array of `Group-Object` using `Where-Object` on every iteration of a loop causes an O(N^2) complexity, leading to massive performance bottlenecks when dealing with large datasets (e.g., thousands of files). The array lookup searches through the entire list linearly.
+**Action:** Always use `Group-Object -AsHashTable -AsString` to create a hash table for O(1) lookups instead. This allows direct access to groups via their key (e.g., `$HashTable[$Key]`) without the need to linearly scan an array with `Where-Object`.

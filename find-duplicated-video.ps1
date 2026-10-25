@@ -46,7 +46,7 @@ Write-Host "Found $($AllVideos.Count) video files."
 Write-Host ""
 
 # Group by filename
-$VideosByName = $AllVideos | Group-Object Name
+$VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
 
 # Only videos inside the folder being cleaned
 $VideosToCheck = $AllVideos | Where-Object {
@@ -60,9 +60,7 @@ foreach ($Video in $VideosToCheck) {
 
     Write-Host "Checking: $($Video.Name)"
 
-    $Candidates = $VideosByName |
-        Where-Object { $_.Name -eq $Video.Name } |
-        Select-Object -ExpandProperty Group |
+    $Candidates = $VideosByName[$Video.Name] |
         Where-Object { $_.FullName -ne $Video.FullName }
 
     foreach ($Candidate in $Candidates) {
@@ -90,7 +88,7 @@ foreach ($Video in $VideosToCheck) {
                 # Prevent filename collisions
                 if (Test-Path $Destination) {
 
-                    $BaseName = [SystemIO.Path]::GetFileNameWithoutExtension($Video.Name)
+                    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($Video.Name)
                     $Extension = [System.IO.Path]::GetExtension($Video.Name)
 
                     $Destination = Join-Path `
