@@ -1,0 +1,3 @@
+## 2026-10-26 - [PowerShell Group-Object O(N^2) Performance Pattern]
+**Learning:** Using `Group-Object Name` and then filtering the resulting array of `GroupInfo` objects using `Where-Object` creates an O(N^2) bottleneck for lookups.
+**Action:** Always use `Group-Object -AsHashTable -AsString` to create an O(1) hash map lookup table instead, which is significantly faster for lookups and avoids nested loop complexity.
