@@ -3,7 +3,7 @@ $ReferenceFolder = "D:\Original\Pictures"
 $QuarantineFolder = "D:\DuplicateFilesFound"
 
 if (!(Test-Path -LiteralPath $QuarantineFolder)) {
-    New-Item -ItemType Directory -Path $QuarantineFolder | Out-Null
+    New-Item -ItemType Directory -LiteralPath $QuarantineFolder | Out-Null
 }
 
 Write-Host "Building size and hash index for reference folder..."
@@ -68,7 +68,7 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
 }
 
 $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport.csv"
-$duplicates | Export-Csv $ReportFile -NoTypeInformation
+$duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation
 
 Write-Host ""
 Write-Host "Completed."

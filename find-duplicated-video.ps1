@@ -10,7 +10,7 @@ $QuarantineFolder = "D:\DuplicateVideosFound"
 
 # Create quarantine folder if missing
 if (!(Test-Path -LiteralPath $QuarantineFolder)) {
-    New-Item -ItemType Directory -Path $QuarantineFolder | Out-Null
+    New-Item -ItemType Directory -LiteralPath $QuarantineFolder | Out-Null
 }
 
 # Video extensions
