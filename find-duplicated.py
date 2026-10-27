@@ -10,10 +10,12 @@ from PIL import Image, ImageOps
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
 
-def compare_jpg_to_nef_preview(jpg_path, nef_path):
+def get_jpg_hash(jpg_path):
     with Image.open(jpg_path) as jpg_file:
         jpg_image = ImageOps.exif_transpose(jpg_file).copy()
+    return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
+def get_nef_hash(nef_path):
     with rawpy.imread(nef_path) as raw_file:
         thumbnail = raw_file.extract_thumb()
 
@@ -25,15 +27,27 @@ def compare_jpg_to_nef_preview(jpg_path, nef_path):
     else:
         raise ValueError(f"Unsupported NEF preview format: {thumbnail.format}")
 
-    jpg_hash = imagehash.phash(jpg_image, hash_size=HASH_SIZE)
-    nef_hash = imagehash.phash(nef_image, hash_size=HASH_SIZE)
+    return imagehash.phash(nef_image, hash_size=HASH_SIZE)
+
+def compare_hashes(jpg_hash, nef_hash):
     return 1 - (jpg_hash - nef_hash) / jpg_hash.hash.size
 
 def process_jpg_file(jpg_path, nef_paths, verbose):
     best_similarity = None
+
+    # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
+    # This turns O(N) expensive image loads/hashes into O(1) for the JPG
+    try:
+        jpg_hash = get_jpg_hash(jpg_path)
+    except Exception as error:
+        if verbose:
+            print(f"Could not load/hash JPG {jpg_path}: {error}")
+        return None, False
+
     for nef_path in nef_paths:
         try:
-            similarity = compare_jpg_to_nef_preview(jpg_path, nef_path)
+            nef_hash = get_nef_hash(nef_path)
+            similarity = compare_hashes(jpg_hash, nef_hash)
         except Exception as error:
             if verbose:
                 print(f"Could not validate {jpg_path} against {nef_path}: {error}")
