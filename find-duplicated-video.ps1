@@ -49,9 +49,12 @@ Write-Host ""
 # ⚡ Bolt: Using -AsHashTable -AsString changes lookup complexity from O(N²) to O(1)
 $VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
 
+# 🛡️ Sentinel: Enforce directory boundary and case-insensitive matching to prevent path confusion (e.g. matching "D:\Folder_Secret" when checking "D:\Folder")
+$FolderToCheckNormalized = $FolderToCheck.TrimEnd('\') + '\'
+
 # Only videos inside the folder being cleaned
 $VideosToCheck = $AllVideos | Where-Object {
-    $_.FullName.StartsWith($FolderToCheck)
+    $_.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 Write-Host "Checking $($VideosToCheck.Count) videos..."
