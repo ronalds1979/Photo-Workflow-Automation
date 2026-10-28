@@ -13,13 +13,16 @@ $referenceFilesBySize = @{}
 Get-ChildItem -LiteralPath $ReferenceFolder -File -Recurse | ForEach-Object {
     $size = $_.Length
     if (-not $referenceFilesBySize.ContainsKey($size)) {
-        $referenceFilesBySize[$size] = @()
+        # ⚡ Bolt: Using List[string] instead of @() to avoid O(N²) reallocation on +=
+        $referenceFilesBySize[$size] = [System.Collections.Generic.List[string]]::new()
     }
-    $referenceFilesBySize[$size] += $_.FullName
+    # ⚡ Bolt: .Add() is O(1) amortized, whereas += on arrays is O(N)
+    $referenceFilesBySize[$size].Add($_.FullName)
 }
 
 $referenceHashes = @{}
-$duplicates = @()
+# ⚡ Bolt: Using List instead of @() for efficient O(1) appends
+$duplicates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 Write-Host "Checking source folder..."
 
@@ -31,7 +34,8 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
             $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
 
             $matchFound = $false
-            $matchingFiles = @()
+            # ⚡ Bolt: Using List[string] instead of @() for efficient O(1) appends
+            $matchingFiles = [System.Collections.Generic.List[string]]::new()
 
             foreach ($refFile in $referenceFilesBySize[$size]) {
                 if (-not $referenceHashes.ContainsKey($refFile)) {
@@ -40,15 +44,15 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
 
                 if ($hash -eq $referenceHashes[$refFile]) {
                     $matchFound = $true
-                    $matchingFiles += $refFile
+                    $matchingFiles.Add($refFile)
                 }
             }
 
             if ($matchFound) {
-                $duplicates += [PSCustomObject]@{
+                $duplicates.Add([PSCustomObject]@{
                     SourceFile = $_.FullName
                     MatchingFiles = ($matchingFiles -join "; ")
-                }
+                })
 
                 $Destination = Join-Path $QuarantineFolder $_.Name
                 if (Test-Path -LiteralPath $Destination) {
