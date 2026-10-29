@@ -60,7 +60,13 @@ $VideosToCheck = $AllVideos | Where-Object {
 Write-Host "Checking $($VideosToCheck.Count) videos..."
 Write-Host ""
 
+# ⚡ Bolt: Cache hashes to avoid recalculating for large video files
+$FileHashes = @{}
+$MovedFiles = @{}
+
 foreach ($Video in $VideosToCheck) {
+
+    if ($MovedFiles.ContainsKey($Video.FullName)) { continue }
 
     Write-Host "Checking: $($Video.Name)"
 
@@ -69,15 +75,23 @@ foreach ($Video in $VideosToCheck) {
 
     foreach ($Candidate in $Candidates) {
 
+        if ($MovedFiles.ContainsKey($Candidate.FullName)) { continue }
+
         # Quick size comparison first
         if ($Video.Length -ne $Candidate.Length) {
             continue
         }
 
         try {
+            if (-not $FileHashes.ContainsKey($Video.FullName)) {
+                $FileHashes[$Video.FullName] = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256).Hash
+            }
+            if (-not $FileHashes.ContainsKey($Candidate.FullName)) {
+                $FileHashes[$Candidate.FullName] = (Get-FileHash -LiteralPath $Candidate.FullName -Algorithm SHA256).Hash
+            }
 
-            $Hash1 = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256).Hash
-            $Hash2 = (Get-FileHash -LiteralPath $Candidate.FullName -Algorithm SHA256).Hash
+            $Hash1 = $FileHashes[$Video.FullName]
+            $Hash2 = $FileHashes[$Candidate.FullName]
 
             if ($Hash1 -eq $Hash2) {
 
@@ -104,6 +118,9 @@ foreach ($Video in $VideosToCheck) {
                     -LiteralPath $Video.FullName `
                     -Destination $Destination `
                     -Force
+
+                # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
+                $MovedFiles[$Video.FullName] = $true
 
                 break
             }

@@ -9,3 +9,7 @@
 ## 2023-11-20 - [PowerShell Array Appending O(N²)]
 **Learning:** In PowerShell, using `+=` to append to an array (`@()`) inside a loop is an O(N²) operation because it creates a new array in memory and copies all elements on every iteration.
 **Action:** Replace `@()` and `+=` with `[System.Collections.Generic.List[T]]` and the `.Add()` method for O(1) amortized appends.
+
+## 2024-05-15 - [PowerShell File Hashing Caching and State Tracking]
+**Learning:** Caching expensive calculations like `Get-FileHash` inside nested loops over large files drastically improves performance (from O(N) to O(1) per lookup). However, if the script alters the file system (e.g., moving or deleting files) during processing, cached elements become stale, causing errors or "phantom matches" in subsequent iterations.
+**Action:** When implementing caching for file metadata, always implement alongside state tracking (e.g., `$MovedFiles = @{}`) to eagerly skip files that have been modified or removed from their original paths.
