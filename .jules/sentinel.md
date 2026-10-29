@@ -6,3 +6,7 @@
 **Vulnerability:** Path confusion vulnerability in `find-duplicated-video.ps1`.
 **Learning:** Using `String.StartsWith()` for filtering paths without appending a directory separator can unintentionally include similarly named sibling directories. E.g., filtering for `D:\MyFolder` will incorrectly match `D:\MyFolder_Secret\video.mp4`. Furthermore, default `StartsWith()` in .NET is case-sensitive, making it unreliable for Windows file paths.
 **Prevention:** Always normalize directory paths by appending a trailing slash (e.g., `TrimEnd('\') + '\'`) and use `[System.StringComparison]::OrdinalIgnoreCase` when comparing paths using `.StartsWith()`.
+## 2023-10-29 - Missing Error Handling Exposing Stack Traces
+**Vulnerability:** Found a missing error handler in `find-duplicated.py` for the `os.remove()` call. If a file was locked or missing permissions, it would crash the program and expose a stack trace.
+**Learning:** File system operations can fail for many reasons outside the program's control. Unhandled exceptions in these operations can leak information about the system through stack traces.
+**Prevention:** Always wrap file operations in `try-except OSError` blocks to fail securely, handle the error gracefully, and log a controlled message instead of a stack trace.

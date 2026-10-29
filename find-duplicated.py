@@ -59,7 +59,13 @@ def process_jpg_file(jpg_path, nef_paths, verbose):
             break
 
     if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
-        os.remove(jpg_path)
+        try:
+            os.remove(jpg_path)
+        except OSError as e:
+            # Always return the error to be logged (even if not verbose,
+            # errors during deletion are important)
+            return f"Error: Failed to delete {jpg_path}: {e}", False
+
         if verbose:
             return f"Deleted: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
         return None, True
