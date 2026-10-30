@@ -104,20 +104,21 @@ foreach ($Video in $VideosToCheck) {
                 $Destination = Join-Path $QuarantineFolder $Video.Name
 
                 # Prevent filename collisions
-                if (Test-Path -LiteralPath $Destination) {
+                $Counter = 1
+                while (Test-Path -LiteralPath $Destination) {
 
                     $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($Video.Name)
                     $Extension = [System.IO.Path]::GetExtension($Video.Name)
 
                     $Destination = Join-Path `
                         $QuarantineFolder `
-                        ("{0}_{1}{2}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Extension)
+                        ("{0}_{1}_{2}{3}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Counter, $Extension)
+                    $Counter++
                 }
 
                 Move-Item `
                     -LiteralPath $Video.FullName `
-                    -Destination $Destination `
-                    -Force
+                    -Destination $Destination
 
                 # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
                 $MovedFiles[$Video.FullName] = $true
