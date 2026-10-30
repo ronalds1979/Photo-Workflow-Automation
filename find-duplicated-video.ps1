@@ -120,7 +120,8 @@ foreach ($Video in $VideosToCheck) {
 
                 Move-Item `
                     -LiteralPath $Video.FullName `
-                    -Destination $Destination
+                    -Destination $Destination `
+                    -ErrorAction Stop
 
                 # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
                 $MovedFiles[$Video.FullName] = $true

@@ -21,12 +21,14 @@ Get-ChildItem -LiteralPath $ReferenceFolder -File -Recurse | ForEach-Object {
 }
 
 $referenceHashes = @{}
+$MovedFiles = @{}
 # ⚡ Bolt: Using List instead of @() for efficient O(1) appends
 $duplicates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 Write-Host "Checking source folder..."
 
 Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
+    if ($MovedFiles.ContainsKey($_.FullName)) { return }
     try {
         $size = $_.Length
 
@@ -63,7 +65,8 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
                     $Counter++
                 }
 
-                Move-Item -LiteralPath $_.FullName -Destination $Destination
+                Move-Item -LiteralPath $_.FullName -Destination $Destination -ErrorAction Stop
+                $MovedFiles[$_.FullName] = $true
                 Write-Host "Moved duplicate to quarantine: $($_.FullName)"
             }
         }
