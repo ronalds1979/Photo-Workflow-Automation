@@ -55,13 +55,15 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
                 })
 
                 $Destination = Join-Path $QuarantineFolder $_.Name
-                if (Test-Path -LiteralPath $Destination) {
+                $Counter = 1
+                while (Test-Path -LiteralPath $Destination) {
                     $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
                     $Extension = [System.IO.Path]::GetExtension($_.Name)
-                    $Destination = Join-Path $QuarantineFolder ("{0}_{1}{2}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Extension)
+                    $Destination = Join-Path $QuarantineFolder ("{0}_{1}_{2}{3}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Counter, $Extension)
+                    $Counter++
                 }
 
-                Move-Item -LiteralPath $_.FullName -Destination $Destination -Force
+                Move-Item -LiteralPath $_.FullName -Destination $Destination
                 Write-Host "Moved duplicate to quarantine: $($_.FullName)"
             }
         }
