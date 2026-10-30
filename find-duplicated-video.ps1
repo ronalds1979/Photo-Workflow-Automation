@@ -71,10 +71,12 @@ foreach ($Video in $VideosToCheck) {
     Write-Host "Checking: $($Video.Name)"
 
     # ⚡ Bolt: Fast hash table lookup instead of filtering the whole collection
-    $Candidates = $VideosByName[$Video.Name] | Where-Object { $_.FullName -ne $Video.FullName }
+    # ⚡ Bolt: Avoided pipeline (Where-Object) overhead by filtering directly inside the loop
+    $AllCandidatesForName = $VideosByName[$Video.Name]
 
-    foreach ($Candidate in $Candidates) {
+    foreach ($Candidate in $AllCandidatesForName) {
 
+        if ($Candidate.FullName -eq $Video.FullName) { continue }
         if ($MovedFiles.ContainsKey($Candidate.FullName)) { continue }
 
         # Quick size comparison first

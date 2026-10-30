@@ -13,3 +13,7 @@
 ## 2024-05-15 - [PowerShell File Hashing Caching and State Tracking]
 **Learning:** Caching expensive calculations like `Get-FileHash` inside nested loops over large files drastically improves performance (from O(N) to O(1) per lookup). However, if the script alters the file system (e.g., moving or deleting files) during processing, cached elements become stale, causing errors or "phantom matches" in subsequent iterations.
 **Action:** When implementing caching for file metadata, always implement alongside state tracking (e.g., `$MovedFiles = @{}`) to eagerly skip files that have been modified or removed from their original paths.
+
+## 2024-10-30 - [PowerShell Pipeline Overhead in Tight Loops]
+**Learning:** Using PowerShell pipelines (like `| Where-Object`) inside tight loops (like nested `foreach` loops) introduces significant overhead because PowerShell has to instantiate pipeline objects and bind parameters for every iteration.
+**Action:** Replace pipeline operators inside inner/tight loops with fast `foreach` or `for` loops, evaluating conditions (e.g. `if`) directly inside the loop to drastically reduce execution overhead.
