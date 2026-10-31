@@ -14,33 +14,24 @@ if (!(Test-Path -LiteralPath $QuarantineFolder)) {
 }
 
 # Video extensions
-$VideoExtensions = @(
-    ".mp4",
-    ".mkv",
-    ".avi",
-    ".mov",
-    ".wmv",
-    ".m4v",
-    ".ts",
-    ".mts",
-    ".m2ts",
-    ".flv",
-    ".webm"
-)
+# ⚡ Bolt: Using HashSet with OrdinalIgnoreCase for O(1) case-insensitive lookups instead of O(N) array scans and .ToLower() allocations
+$VideoExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+@(".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".mts", ".m2ts", ".flv", ".webm") | ForEach-Object {
+    $VideoExtensions.Add($_) | Out-Null
+}
 
 Write-Host ""
 Write-Host "Scanning drive..."
 Write-Host ""
 
 # Read all video files once
-$AllVideos = Get-ChildItem `
-    -LiteralPath $DriveRoot `
-    -File `
-    -Recurse `
-    -ErrorAction SilentlyContinue |
-    Where-Object {
-        $VideoExtensions -contains $_.Extension.ToLower()
+# ⚡ Bolt: Removed `| Where-Object` pipeline overhead and used a List for efficient appends
+$AllVideos = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+foreach ($file in Get-ChildItem -LiteralPath $DriveRoot -File -Recurse -ErrorAction SilentlyContinue) {
+    if ($VideoExtensions.Contains($file.Extension)) {
+        $AllVideos.Add($file)
     }
+}
 
 Write-Host "Found $($AllVideos.Count) video files."
 Write-Host ""
@@ -53,8 +44,12 @@ $VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
 $FolderToCheckNormalized = $FolderToCheck.TrimEnd('\') + '\'
 
 # Only videos inside the folder being cleaned
-$VideosToCheck = $AllVideos | Where-Object {
-    $_.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)
+# ⚡ Bolt: Removed `| Where-Object` pipeline overhead
+$VideosToCheck = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+foreach ($video in $AllVideos) {
+    if ($video.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $VideosToCheck.Add($video)
+    }
 }
 
 Write-Host "Checking $($VideosToCheck.Count) videos..."

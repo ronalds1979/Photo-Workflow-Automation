@@ -17,3 +17,7 @@
 ## 2024-10-30 - [PowerShell Pipeline Overhead in Tight Loops]
 **Learning:** Using PowerShell pipelines (like `| Where-Object`) inside tight loops (like nested `foreach` loops) introduces significant overhead because PowerShell has to instantiate pipeline objects and bind parameters for every iteration.
 **Action:** Replace pipeline operators inside inner/tight loops with fast `foreach` or `for` loops, evaluating conditions (e.g. `if`) directly inside the loop to drastically reduce execution overhead.
+
+## 2024-11-20 - [PowerShell Pipeline & String Allocation Overhead on File Scans]
+**Learning:** Initializing large file sets using `Get-ChildItem | Where-Object` along with array scans (`-contains`) and per-item string allocations (`.ToLower()`) causes significant CPU and memory overhead during drive-wide scans.
+**Action:** Replace initial pipeline filtering on large datasets with standard `foreach` loops over the base collection, and use `[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)` for O(1) condition checks, storing results in a `[System.Collections.Generic.List[T]]`.
