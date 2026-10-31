@@ -10,7 +10,7 @@ Write-Host "Building size and hash index for reference folder..."
 
 $referenceFilesBySize = @{}
 
-Get-ChildItem -LiteralPath $ReferenceFolder -File -Recurse | ForEach-Object {
+Get-ChildItem -LiteralPath $ReferenceFolder -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
     $size = $_.Length
     if (-not $referenceFilesBySize.ContainsKey($size)) {
         # ⚡ Bolt: Using List[string] instead of @() to avoid O(N²) reallocation on +=
@@ -27,7 +27,7 @@ $duplicates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 Write-Host "Checking source folder..."
 
-Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
+Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
     if ($MovedFiles.ContainsKey($_.FullName)) { return }
     try {
         $size = $_.Length
@@ -76,7 +76,7 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse | ForEach-Object {
     }
 }
 
-$ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport.csv"
+$ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation
 
 Write-Host ""
