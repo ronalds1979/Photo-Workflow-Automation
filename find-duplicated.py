@@ -86,6 +86,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
         for root, _, files in os.walk(directory):
             nef_paths_by_prefix = {}
             for filename in files:
+                if os.path.islink(os.path.join(root, filename)):
+                    continue
                 stem, extension = os.path.splitext(filename)
                 if extension.casefold() == ".nef" and len(stem) > 9:
                     prefix = stem[:-9].casefold()
@@ -94,6 +96,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                     )
 
             for filename in files:
+                if os.path.islink(os.path.join(root, filename)):
+                    continue
                 stem, extension = os.path.splitext(filename)
                 if extension.casefold() != ".jpg" or len(stem) <= 9:
                     continue
