@@ -10,14 +10,15 @@ Write-Host "Building size and hash index for reference folder..."
 
 $referenceFilesBySize = @{}
 
-Get-ChildItem -LiteralPath $ReferenceFolder -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-    $size = $_.Length
+# ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
+foreach ($file in Get-ChildItem -LiteralPath $ReferenceFolder -File -Recurse -ErrorAction SilentlyContinue) {
+    $size = $file.Length
     if (-not $referenceFilesBySize.ContainsKey($size)) {
         # ⚡ Bolt: Using List[string] instead of @() to avoid O(N²) reallocation on +=
         $referenceFilesBySize[$size] = [System.Collections.Generic.List[string]]::new()
     }
     # ⚡ Bolt: .Add() is O(1) amortized, whereas += on arrays is O(N)
-    $referenceFilesBySize[$size].Add($_.FullName)
+    $referenceFilesBySize[$size].Add($file.FullName)
 }
 
 $referenceHashes = @{}
@@ -27,13 +28,14 @@ $duplicates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 Write-Host "Checking source folder..."
 
-Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($MovedFiles.ContainsKey($_.FullName)) { return }
+# ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
+foreach ($file in Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -ErrorAction SilentlyContinue) {
+    if ($MovedFiles.ContainsKey($file.FullName)) { continue }
     try {
-        $size = $_.Length
+        $size = $file.Length
 
         if ($referenceFilesBySize.ContainsKey($size)) {
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
 
             $matchFound = $false
             # ⚡ Bolt: Using List[string] instead of @() for efficient O(1) appends
@@ -52,27 +54,27 @@ Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -ErrorAction SilentlyCon
 
             if ($matchFound) {
                 $duplicates.Add([PSCustomObject]@{
-                    SourceFile = $_.FullName
+                    SourceFile = $file.FullName
                     MatchingFiles = ($matchingFiles -join "; ")
                 })
 
-                $Destination = Join-Path $QuarantineFolder $_.Name
+                $Destination = Join-Path $QuarantineFolder $file.Name
                 $Counter = 1
                 while (Test-Path -LiteralPath $Destination) {
-                    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
-                    $Extension = [System.IO.Path]::GetExtension($_.Name)
+                    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                    $Extension = [System.IO.Path]::GetExtension($file.Name)
                     $Destination = Join-Path $QuarantineFolder ("{0}_{1}_{2}{3}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Counter, $Extension)
                     $Counter++
                 }
 
-                Move-Item -LiteralPath $_.FullName -Destination $Destination -ErrorAction Stop
-                $MovedFiles[$_.FullName] = $true
-                Write-Host "Moved duplicate to quarantine: $($_.FullName)"
+                Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
+                $MovedFiles[$file.FullName] = $true
+                Write-Host "Moved duplicate to quarantine: $($file.FullName)"
             }
         }
     }
     catch {
-        Write-Warning "Failed to process: $($_.FullName)"
+        Write-Warning "Failed to process: $($file.FullName)"
     }
 }
 
