@@ -85,24 +85,24 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for root, _, files in os.walk(directory):
             nef_paths_by_prefix = {}
+            jpg_candidates = []
+
+            # ⚡ Bolt: Single pass over files to avoid redundant os.path.islink() stat calls
             for filename in files:
-                if os.path.islink(os.path.join(root, filename)):
+                filepath = os.path.join(root, filename)
+                if os.path.islink(filepath):
                     continue
+
                 stem, extension = os.path.splitext(filename)
-                if extension.casefold() == ".nef" and len(stem) > 9:
+                ext_lower = extension.casefold()
+
+                if ext_lower == ".nef" and len(stem) > 9:
                     prefix = stem[:-9].casefold()
-                    nef_paths_by_prefix.setdefault(prefix, []).append(
-                        os.path.join(root, filename)
-                    )
+                    nef_paths_by_prefix.setdefault(prefix, []).append(filepath)
+                elif ext_lower == ".jpg" and len(stem) > 9:
+                    jpg_candidates.append((filepath, stem))
 
-            for filename in files:
-                if os.path.islink(os.path.join(root, filename)):
-                    continue
-                stem, extension = os.path.splitext(filename)
-                if extension.casefold() != ".jpg" or len(stem) <= 9:
-                    continue
-
-                jpg_path = os.path.join(root, filename)
+            for jpg_path, stem in jpg_candidates:
                 nef_paths = nef_paths_by_prefix.get(stem[:-9].casefold(), [])
                 if not nef_paths:
                     continue
