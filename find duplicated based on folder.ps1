@@ -3,7 +3,13 @@ $ReferenceFolder = "D:\Original\Pictures"
 $QuarantineFolder = "D:\DuplicateFilesFound"
 
 if (!(Test-Path -LiteralPath $QuarantineFolder)) {
-    New-Item -ItemType Directory -LiteralPath $QuarantineFolder | Out-Null
+    try {
+        New-Item -ItemType Directory -LiteralPath $QuarantineFolder -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Warning "Failed to create quarantine folder: $($_.Exception.Message)"
+        exit
+    }
 }
 
 Write-Host "Building size and hash index for reference folder..."
@@ -79,9 +85,15 @@ foreach ($file in Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -Error
 }
 
 $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-$duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation
+
+try {
+    $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -ErrorAction Stop
+}
+catch {
+    Write-Warning "Failed to save report: $($_.Exception.Message)"
+}
 
 Write-Host ""
 Write-Host "Completed."
 Write-Host "Duplicates moved to: $QuarantineFolder"
-Write-Host "Report saved to: $ReportFile"
+Write-Host "Report attempted to save to: $ReportFile"
