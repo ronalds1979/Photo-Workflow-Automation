@@ -21,3 +21,7 @@
 ## 2024-11-20 - [PowerShell Pipeline & String Allocation Overhead on File Scans]
 **Learning:** Initializing large file sets using `Get-ChildItem | Where-Object` along with array scans (`-contains`) and per-item string allocations (`.ToLower()`) causes significant CPU and memory overhead during drive-wide scans.
 **Action:** Replace initial pipeline filtering on large datasets with standard `foreach` loops over the base collection, and use `[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)` for O(1) condition checks, storing results in a `[System.Collections.Generic.List[T]]`.
+
+## 2024-11-21 - [Python `os.walk` Redundant Iteration O(N)]
+**Learning:** When using `os.walk`, iterating over the `files` array multiple times in separate loops (e.g., once to find `.nef` files and once for `.jpg` files) when those loops contain slow I/O-bound checks like `os.path.islink()` results in redundant system calls (like `stat`). This doubles the discovery overhead and causes a hidden O(N) performance penalty.
+**Action:** Consolidate filtering logic and categorize file paths within a single iteration pass over the `files` array. Store the results in dictionaries or lists for subsequent processing to minimize system calls.
