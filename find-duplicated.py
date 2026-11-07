@@ -32,51 +32,65 @@ def get_nef_hash(nef_path):
 def compare_hashes(jpg_hash, nef_hash):
     return 1 - (jpg_hash - nef_hash) / jpg_hash.hash.size
 
-def process_jpg_file(jpg_path, nef_paths, verbose):
-    best_similarity = None
+def process_prefix_group(jpg_paths, nef_paths, verbose):
+    results = []
 
-    # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
-    # This turns O(N) expensive image loads/hashes into O(1) for the JPG
-    try:
-        jpg_hash = get_jpg_hash(jpg_path)
-    except Exception as error:
-        if verbose:
-            print(f"Could not load/hash JPG {jpg_path}: {error}")
-        return None, False
-
+    # ⚡ Bolt: Cache NEF hashes first to avoid recalculating them for every JPG with the same prefix.
+    # This turns O(M*N) expensive image loads/hashes into O(M+N).
+    cached_nef_hashes = {}
     for nef_path in nef_paths:
         try:
-            nef_hash = get_nef_hash(nef_path)
-            similarity = compare_hashes(jpg_hash, nef_hash)
+            cached_nef_hashes[nef_path] = get_nef_hash(nef_path)
         except Exception as error:
             if verbose:
-                print(f"Could not validate {jpg_path} against {nef_path}: {error}")
+                print(f"Could not load/hash NEF {nef_path}: {error}")
             continue
 
-        if best_similarity is None or similarity > best_similarity:
-            best_similarity = similarity
-        if similarity >= MIN_HASH_SIMILARITY:
-            break
+    if not cached_nef_hashes:
+        return []
 
-    if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
+    for jpg_path in jpg_paths:
+        best_similarity = None
+
         try:
-            os.remove(jpg_path)
-        except OSError as e:
-            # Always return the error to be logged (even if not verbose,
-            # errors during deletion are important)
-            return f"Error: Failed to delete {jpg_path}: {e}", False
+            jpg_hash = get_jpg_hash(jpg_path)
+        except Exception as error:
+            if verbose:
+                results.append((f"Could not load/hash JPG {jpg_path}: {error}", False))
+            continue
 
-        if verbose:
-            return f"Deleted: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
-        return None, True
-    elif verbose:
-        if best_similarity is None:
-            reason = "could not calculate a perceptual hash"
-        else:
-            reason = f"best perceptual hash similarity: {best_similarity:.2%}"
-        return f"Kept: {jpg_path} ({reason})", False
+        for nef_path, nef_hash in cached_nef_hashes.items():
+            try:
+                similarity = compare_hashes(jpg_hash, nef_hash)
+            except Exception as error:
+                if verbose:
+                    print(f"Could not validate {jpg_path} against {nef_path}: {error}")
+                continue
 
-    return None, False
+            if best_similarity is None or similarity > best_similarity:
+                best_similarity = similarity
+            if similarity >= MIN_HASH_SIMILARITY:
+                break
+
+        if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
+            try:
+                os.remove(jpg_path)
+                if verbose:
+                    results.append((f"Deleted: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True))
+                else:
+                    results.append((None, True))
+            except OSError as e:
+                # Always return the error to be logged (even if not verbose,
+                # errors during deletion are important)
+                results.append((f"Error: Failed to delete {jpg_path}: {e}", False))
+        elif verbose:
+            if best_similarity is None:
+                reason = "could not calculate a perceptual hash"
+            else:
+                reason = f"best perceptual hash similarity: {best_similarity:.2%}"
+            results.append((f"Kept: {jpg_path} ({reason})", False))
+
+    return results
 
 def delete_jpgs_with_nef_pairs(directory, verbose=False):
     deleted_count = 0
@@ -85,7 +99,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for root, _, files in os.walk(directory):
             nef_paths_by_prefix = {}
-            jpg_paths = []
+            jpg_paths_by_prefix = {}
 
             # ⚡ Bolt: Consolidated two iterations over `files` into a single pass.
             # This avoids redundant `os.path.islink` checks which cause slow `stat` system calls,
@@ -102,21 +116,22 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                     prefix = stem[:-9].casefold()
                     nef_paths_by_prefix.setdefault(prefix, []).append(filepath)
                 elif ext_lower == ".jpg" and len(stem) > 9:
-                    jpg_paths.append((filepath, stem[:-9].casefold()))
+                    prefix = stem[:-9].casefold()
+                    jpg_paths_by_prefix.setdefault(prefix, []).append(filepath)
 
-            for jpg_path, prefix in jpg_paths:
+            for prefix, jpg_paths in jpg_paths_by_prefix.items():
                 nef_paths = nef_paths_by_prefix.get(prefix, [])
                 if not nef_paths:
                     continue
 
-                tasks.append(executor.submit(process_jpg_file, jpg_path, nef_paths, verbose))
+                tasks.append(executor.submit(process_prefix_group, jpg_paths, nef_paths, verbose))
 
         for future in concurrent.futures.as_completed(tasks):
-            msg, deleted = future.result()
-            if msg:
-                print(msg)
-            if deleted:
-                deleted_count += 1
+            for msg, deleted in future.result():
+                if msg:
+                    print(msg)
+                if deleted:
+                    deleted_count += 1
 
     return deleted_count
 
