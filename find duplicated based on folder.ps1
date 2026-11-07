@@ -41,7 +41,7 @@ foreach ($file in Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -Error
         $size = $file.Length
 
         if ($referenceFilesBySize.ContainsKey($size)) {
-            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
 
             $matchFound = $false
             # ⚡ Bolt: Using List[string] instead of @() for efficient O(1) appends
@@ -49,7 +49,7 @@ foreach ($file in Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -Error
 
             foreach ($refFile in $referenceFilesBySize[$size]) {
                 if (-not $referenceHashes.ContainsKey($refFile)) {
-                    $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256).Hash
+                    $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
                 }
 
                 if ($hash -eq $referenceHashes[$refFile]) {
@@ -80,7 +80,7 @@ foreach ($file in Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -Error
         }
     }
     catch {
-        Write-Warning "Failed to process: $($file.FullName)"
+        Write-Warning "Failed to process: $($file.FullName) - $($_.Exception.Message)"
     }
 }
 
