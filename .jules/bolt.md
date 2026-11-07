@@ -25,3 +25,7 @@
 ## 2024-11-21 - [Python `os.walk` Redundant Iteration O(N)]
 **Learning:** When using `os.walk`, iterating over the `files` array multiple times in separate loops (e.g., once to find `.nef` files and once for `.jpg` files) when those loops contain slow I/O-bound checks like `os.path.islink()` results in redundant system calls (like `stat`). This doubles the discovery overhead and causes a hidden O(N) performance penalty.
 **Action:** Consolidate filtering logic and categorize file paths within a single iteration pass over the `files` array. Store the results in dictionaries or lists for subsequent processing to minimize system calls.
+
+## 2024-05-24 - Python Performance Pattern: Hoisting Perceptual Hashing
+**Learning:** Found an O(M*N) performance bottleneck in `find-duplicated.py` when validating multiple JPGs and NEFs that share the same base filename prefix. The script was re-computing the expensive `rawpy` and perceptual hash of each NEF file multiple times, which involved redundant I/O reads.
+**Action:** Used a `process_prefix_group` worker function that iterates over the NEF files *first* to compute and cache their hashes into a dictionary. Then, it iterates over the JPG files, significantly reducing the bottleneck by changing the complexity to O(M+N).
