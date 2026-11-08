@@ -25,3 +25,7 @@
 ## 2024-11-21 - [Python `os.walk` Redundant Iteration O(N)]
 **Learning:** When using `os.walk`, iterating over the `files` array multiple times in separate loops (e.g., once to find `.nef` files and once for `.jpg` files) when those loops contain slow I/O-bound checks like `os.path.islink()` results in redundant system calls (like `stat`). This doubles the discovery overhead and causes a hidden O(N) performance penalty.
 **Action:** Consolidate filtering logic and categorize file paths within a single iteration pass over the `files` array. Store the results in dictionaries or lists for subsequent processing to minimize system calls.
+
+## 2024-11-22 - [Python PIL Redundant Memory Allocation and Copy]
+**Learning:** In Python PIL, `ImageOps.exif_transpose()` already returns a new Image object (either transposed or a direct copy if no transposition was needed). Calling `.copy()` immediately after `ImageOps.exif_transpose()` is redundant and allocates a full new image buffer in memory, drastically increasing memory overhead and processing time for large images (e.g. 4000x3000 JPG/NEF thumbnails).
+**Action:** Remove the redundant `.copy()` after `ImageOps.exif_transpose()` to avoid double memory allocation and speed up the hash generation process.
