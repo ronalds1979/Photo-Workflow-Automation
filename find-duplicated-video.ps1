@@ -87,10 +87,10 @@ foreach ($Video in $VideosToCheck) {
 
         try {
             if (-not $FileHashes.ContainsKey($Video.FullName)) {
-                $FileHashes[$Video.FullName] = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256).Hash
+                $FileHashes[$Video.FullName] = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
             }
             if (-not $FileHashes.ContainsKey($Candidate.FullName)) {
-                $FileHashes[$Candidate.FullName] = (Get-FileHash -LiteralPath $Candidate.FullName -Algorithm SHA256).Hash
+                $FileHashes[$Candidate.FullName] = (Get-FileHash -LiteralPath $Candidate.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
             }
 
             $Hash1 = $FileHashes[$Video.FullName]
