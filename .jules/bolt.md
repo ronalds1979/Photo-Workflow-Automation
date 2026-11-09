@@ -29,3 +29,7 @@
 ## 2024-11-22 - [Python PIL Redundant Memory Allocation and Copy]
 **Learning:** In Python PIL, `ImageOps.exif_transpose()` already returns a new Image object (either transposed or a direct copy if no transposition was needed). Calling `.copy()` immediately after `ImageOps.exif_transpose()` is redundant and allocates a full new image buffer in memory, drastically increasing memory overhead and processing time for large images (e.g. 4000x3000 JPG/NEF thumbnails).
 **Action:** Remove the redundant `.copy()` after `ImageOps.exif_transpose()` to avoid double memory allocation and speed up the hash generation process.
+
+## 2024-11-23 - [Python os.walk Redundant Stat Calls]
+**Learning:** Using `os.walk` paired with manual path construction and `os.path.islink()` incurs significant and redundant `stat` system calls, doubling the file discovery overhead and resulting in O(N) performance penalties for I/O operations.
+**Action:** Replace `os.walk` with `os.scandir` when manually traversing directories. It directly yields `DirEntry` objects that cache file attributes and provide fast `.is_symlink()`, `.is_dir()`, and `.is_file()` checks, completely avoiding the redundant `stat` calls.

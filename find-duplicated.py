@@ -83,33 +83,44 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
     tasks = []
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        for root, _, files in os.walk(directory):
-            nef_paths_by_prefix = {}
-            jpg_paths = []
+        directories_to_scan = [directory]
+        while directories_to_scan:
+            current_dir = directories_to_scan.pop()
+            try:
+                entries = os.scandir(current_dir)
+            except OSError as e:
+                if verbose:
+                    print(f"Could not scan directory {current_dir}: {e}")
+                continue
 
-            # ⚡ Bolt: Consolidated two iterations over `files` into a single pass.
-            # This avoids redundant `os.path.islink` checks which cause slow `stat` system calls,
-            # halving the I/O discovery overhead.
-            for filename in files:
-                filepath = os.path.join(root, filename)
-                if os.path.islink(filepath):
-                    continue
+            with entries:
+                nef_paths_by_prefix = {}
+                jpg_paths = []
 
-                stem, extension = os.path.splitext(filename)
-                ext_lower = extension.casefold()
+                # ⚡ Bolt: Use os.scandir() and entry.is_symlink() instead of os.walk() and os.path.islink()
+                # to avoid redundant and slow `stat` system calls during directory traversal.
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
 
-                if ext_lower == ".nef" and len(stem) > 9:
-                    prefix = stem[:-9].casefold()
-                    nef_paths_by_prefix.setdefault(prefix, []).append(filepath)
-                elif ext_lower == ".jpg" and len(stem) > 9:
-                    jpg_paths.append((filepath, stem[:-9].casefold()))
+                    if entry.is_dir(follow_symlinks=False):
+                        directories_to_scan.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        stem, extension = os.path.splitext(entry.name)
+                        ext_lower = extension.casefold()
 
-            for jpg_path, prefix in jpg_paths:
-                nef_paths = nef_paths_by_prefix.get(prefix, [])
-                if not nef_paths:
-                    continue
+                        if ext_lower == ".nef" and len(stem) > 9:
+                            prefix = stem[:-9].casefold()
+                            nef_paths_by_prefix.setdefault(prefix, []).append(entry.path)
+                        elif ext_lower == ".jpg" and len(stem) > 9:
+                            jpg_paths.append((entry.path, stem[:-9].casefold()))
 
-                tasks.append(executor.submit(process_jpg_file, jpg_path, nef_paths, verbose))
+                for jpg_path, prefix in jpg_paths:
+                    nef_paths = nef_paths_by_prefix.get(prefix, [])
+                    if not nef_paths:
+                        continue
+
+                    tasks.append(executor.submit(process_jpg_file, jpg_path, nef_paths, verbose))
 
         for future in concurrent.futures.as_completed(tasks):
             msg, deleted = future.result()
