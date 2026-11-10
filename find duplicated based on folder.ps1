@@ -80,7 +80,7 @@ foreach ($file in Get-ChildItem -LiteralPath $SourceFolder -File -Recurse -Error
         }
     }
     catch {
-        Write-Warning "Failed to process: $($file.FullName)"
+        Write-Warning "Failed to process: $($file.FullName) - $($_.Exception.Message)"
     }
 }
 
