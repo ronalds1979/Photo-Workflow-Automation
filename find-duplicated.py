@@ -83,26 +83,38 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
     tasks = []
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        for root, _, files in os.walk(directory):
+        stack = [directory]
+        while stack:
+            current_dir = stack.pop()
+            try:
+                with os.scandir(current_dir) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+
             nef_paths_by_prefix = {}
             jpg_paths = []
 
             # ⚡ Bolt: Consolidated two iterations over `files` into a single pass.
             # This avoids redundant `os.path.islink` checks which cause slow `stat` system calls,
             # halving the I/O discovery overhead.
-            for filename in files:
-                filepath = os.path.join(root, filename)
-                if os.path.islink(filepath):
+            # ⚡ Bolt: Replaced os.walk with os.scandir stack-based traversal to use entry.is_symlink()
+            # and entry.is_dir()/is_file(), eliminating implicit `stat` overhead in os.walk and os.path.
+            for entry in entries:
+                if entry.is_symlink():
                     continue
 
-                stem, extension = os.path.splitext(filename)
-                ext_lower = extension.casefold()
+                if entry.is_dir():
+                    stack.append(entry.path)
+                elif entry.is_file():
+                    stem, extension = os.path.splitext(entry.name)
+                    ext_lower = extension.casefold()
 
-                if ext_lower == ".nef" and len(stem) > 9:
-                    prefix = stem[:-9].casefold()
-                    nef_paths_by_prefix.setdefault(prefix, []).append(filepath)
-                elif ext_lower == ".jpg" and len(stem) > 9:
-                    jpg_paths.append((filepath, stem[:-9].casefold()))
+                    if ext_lower == ".nef" and len(stem) > 9:
+                        prefix = stem[:-9].casefold()
+                        nef_paths_by_prefix.setdefault(prefix, []).append(entry.path)
+                    elif ext_lower == ".jpg" and len(stem) > 9:
+                        jpg_paths.append((entry.path, stem[:-9].casefold()))
 
             for jpg_path, prefix in jpg_paths:
                 nef_paths = nef_paths_by_prefix.get(prefix, [])
