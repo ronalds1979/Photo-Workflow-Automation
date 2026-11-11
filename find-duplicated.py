@@ -124,11 +124,14 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                 tasks.append(executor.submit(process_jpg_file, jpg_path, nef_paths, verbose))
 
         for future in concurrent.futures.as_completed(tasks):
-            msg, deleted = future.result()
-            if msg:
-                print(msg)
-            if deleted:
-                deleted_count += 1
+            try:
+                msg, deleted = future.result()
+                if msg:
+                    print(msg)
+                if deleted:
+                    deleted_count += 1
+            except Exception as e:
+                print(f"Error processing a file pair: {e}")
 
     return deleted_count
 
@@ -149,11 +152,16 @@ def main():
     if not os.path.isdir(args.folder):
         parser.error(f"not a folder: {args.folder}")
 
-    deleted_count = delete_jpgs_with_nef_pairs(args.folder, verbose=args.verbose)
-    print(
-        f"Deleted {deleted_count} .jpg file(s) with at least "
-        f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity."
-    )
+    try:
+        deleted_count = delete_jpgs_with_nef_pairs(args.folder, verbose=args.verbose)
+        print(
+            f"Deleted {deleted_count} .jpg file(s) with at least "
+            f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity."
+        )
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
 
 if __name__ == "__main__":
     main()
