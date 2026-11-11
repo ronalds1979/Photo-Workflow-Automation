@@ -7,6 +7,9 @@ import imagehash
 import rawpy
 from PIL import Image, ImageOps
 
+# 🛡️ Sentinel: Explicitly bound maximum image pixels (~100MP) to prevent Decompression Bomb DoS attacks
+Image.MAX_IMAGE_PIXELS = 100_000_000
+
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
 
@@ -107,13 +110,18 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                 if entry.is_dir():
                     stack.append(entry.path)
                 elif entry.is_file():
-                    stem, extension = os.path.splitext(entry.name)
+                    name = entry.name
+                    # ⚡ Bolt: Fast-path length check before os.path.splitext() and .casefold().
+                    # A valid stem > 9 chars plus a 4-char extension (.nef/.jpg) requires len > 13.
+                    if len(name) <= 13:
+                        continue
+                    stem, extension = os.path.splitext(name)
                     ext_lower = extension.casefold()
 
-                    if ext_lower == ".nef" and len(stem) > 9:
+                    if ext_lower == ".nef":
                         prefix = stem[:-9].casefold()
                         nef_paths_by_prefix.setdefault(prefix, []).append(entry.path)
-                    elif ext_lower == ".jpg" and len(stem) > 9:
+                    elif ext_lower == ".jpg":
                         jpg_paths.append((entry.path, stem[:-9].casefold()))
 
             for jpg_path, prefix in jpg_paths:
