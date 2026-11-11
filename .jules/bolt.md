@@ -33,3 +33,7 @@
 ## 2024-11-23 - [Python Directory Traversal `os.walk` vs `os.scandir` bottleneck]
 **Learning:** Using `os.walk` along with `os.path.islink()` for directory traversal performs redundant `stat` system calls under the hood, significantly slowing down file discovery in directories with many files.
 **Action:** Replace `os.walk` with a stack-based traversal using `os.scandir()`. This allows checking `entry.is_symlink()`, `entry.is_dir()`, and `entry.is_file()` directly on the `DirEntry` objects, which caches the `stat` results from the directory read and drastically reduces slow I/O operations.
+
+## 2024-11-23 - [PowerShell Loop Fast Fail & Console I/O Avoidance]
+**Learning:** Console output cmdlets like `Write-Host` are surprisingly slow in PowerShell. Placing them inside tight loops before checking if a file actually needs processing causes unnecessary I/O bottleneck when iterating over large collections where most items will be skipped.
+**Action:** Always fetch related cache/collection items first, and use early returns (e.g. `if ($Collection.Count -le 1) { continue }`) to quickly skip elements and bypass subsequent slow console output or complex loop initialization for irrelevant items.
