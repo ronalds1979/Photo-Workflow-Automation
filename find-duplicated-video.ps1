@@ -69,11 +69,14 @@ foreach ($Video in $VideosToCheck) {
 
     if ($MovedFiles.ContainsKey($Video.FullName)) { continue }
 
-    Write-Host "Checking: $($Video.Name)"
-
     # ⚡ Bolt: Fast hash table lookup instead of filtering the whole collection
     # ⚡ Bolt: Avoided pipeline (Where-Object) overhead by filtering directly inside the loop
     $AllCandidatesForName = $VideosByName[$Video.Name]
+
+    # ⚡ Bolt: Early return to avoid slow Write-Host I/O and loop setup if there are no duplicates to check
+    if ($AllCandidatesForName.Count -le 1) { continue }
+
+    Write-Host "Checking: $($Video.Name)"
 
     foreach ($Candidate in $AllCandidatesForName) {
 
