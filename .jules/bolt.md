@@ -37,3 +37,7 @@
 ## 2024-11-23 - [PowerShell Loop Fast Fail & Console I/O Avoidance]
 **Learning:** Console output cmdlets like `Write-Host` are surprisingly slow in PowerShell. Placing them inside tight loops before checking if a file actually needs processing causes unnecessary I/O bottleneck when iterating over large collections where most items will be skipped.
 **Action:** Always fetch related cache/collection items first, and use early returns (e.g. `if ($Collection.Count -le 1) { continue }`) to quickly skip elements and bypass subsequent slow console output or complex loop initialization for irrelevant items.
+
+## 2024-11-23 - [Python PIL JPEG Loading Bottleneck for Perceptual Hashing]
+**Learning:** Loading large high-resolution JPEGs fully into memory using PIL `Image.open()` before hashing them (which drastically resizes them down to 32x32 anyway) is a massive performance bottleneck due to unnecessary decoding of the full image.
+**Action:** Use `image.draft('RGB', (max_w, max_h))` immediately after `Image.open()` and before any other operations. This instructs the underlying JPEG decoder to load a downsampled version of the image (often up to 1/8th scale), speeding up the load and subsequent processing operations by an order of magnitude.

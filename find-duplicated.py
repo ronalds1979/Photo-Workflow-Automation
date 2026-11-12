@@ -15,6 +15,9 @@ MIN_HASH_SIMILARITY = 0.98
 
 def get_jpg_hash(jpg_path):
     with Image.open(jpg_path) as jpg_file:
+        # ⚡ Bolt: Fast JPEG decode (load at roughly 1/8th scale) to drastically speed up processing
+        # since imagehash scales it down to HASH_SIZExHASH_SIZE anyway.
+        jpg_file.draft("RGB", (512, 512))
         jpg_image = ImageOps.exif_transpose(jpg_file)
     return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
@@ -24,6 +27,8 @@ def get_nef_hash(nef_path):
 
     if thumbnail.format == rawpy.ThumbFormat.JPEG:
         with Image.open(io.BytesIO(thumbnail.data)) as preview_file:
+            # ⚡ Bolt: Fast JPEG decode to speed up hashing NEF thumbnails
+            preview_file.draft("RGB", (512, 512))
             nef_image = ImageOps.exif_transpose(preview_file)
     elif thumbnail.format == rawpy.ThumbFormat.BITMAP:
         nef_image = Image.fromarray(thumbnail.data)
