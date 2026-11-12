@@ -15,6 +15,8 @@ MIN_HASH_SIMILARITY = 0.98
 
 def get_jpg_hash(jpg_path):
     with Image.open(jpg_path) as jpg_file:
+        # ⚡ Bolt: Use libjpeg DCT downscaling + grayscale draft mode before EXIF transpose (phash resizes to 128x128)
+        jpg_file.draft("L", (512, 512))
         jpg_image = ImageOps.exif_transpose(jpg_file)
     return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
@@ -24,6 +26,8 @@ def get_nef_hash(nef_path):
 
     if thumbnail.format == rawpy.ThumbFormat.JPEG:
         with Image.open(io.BytesIO(thumbnail.data)) as preview_file:
+            # ⚡ Bolt: Downscale full-res embedded NEF JPEG previews during decode
+            preview_file.draft("L", (512, 512))
             nef_image = ImageOps.exif_transpose(preview_file)
     elif thumbnail.format == rawpy.ThumbFormat.BITMAP:
         nef_image = Image.fromarray(thumbnail.data)
@@ -35,7 +39,7 @@ def get_nef_hash(nef_path):
 def compare_hashes(jpg_hash, nef_hash):
     return 1 - (jpg_hash - nef_hash) / jpg_hash.hash.size
 
-def process_jpg_file(jpg_path, nef_paths, verbose):
+def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None):
     best_similarity = None
 
     # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
@@ -49,7 +53,12 @@ def process_jpg_file(jpg_path, nef_paths, verbose):
 
     for nef_path in nef_paths:
         try:
-            nef_hash = get_nef_hash(nef_path)
+            if nef_hash_cache is not None and nef_path in nef_hash_cache:
+                nef_hash = nef_hash_cache[nef_path]
+            else:
+                nef_hash = get_nef_hash(nef_path)
+                if nef_hash_cache is not None:
+                    nef_hash_cache[nef_path] = nef_hash
             similarity = compare_hashes(jpg_hash, nef_hash)
         except Exception as error:
             if verbose:
@@ -80,6 +89,14 @@ def process_jpg_file(jpg_path, nef_paths, verbose):
         return f"Kept: {jpg_path} ({reason})", False
 
     return None, False
+
+def process_prefix_group(jpg_paths, nef_paths, verbose):
+    # ⚡ Bolt: Cache NEF hashes across JPGs sharing the same prefix in a directory
+    nef_hash_cache = {} if len(jpg_paths) > 1 else None
+    results = []
+    for jpg_path in jpg_paths:
+        results.append(process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=nef_hash_cache))
+    return results
 
 def delete_jpgs_with_nef_pairs(directory, verbose=False):
     deleted_count = 0
@@ -124,20 +141,21 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                     elif ext_lower == ".jpg":
                         jpg_paths.append((entry.path, stem[:-9].casefold()))
 
+            jpgs_by_prefix = {}
             for jpg_path, prefix in jpg_paths:
-                nef_paths = nef_paths_by_prefix.get(prefix, [])
-                if not nef_paths:
-                    continue
+                if prefix in nef_paths_by_prefix:
+                    jpgs_by_prefix.setdefault(prefix, []).append(jpg_path)
 
-                tasks.append(executor.submit(process_jpg_file, jpg_path, nef_paths, verbose))
+            for prefix, group_jpgs in jpgs_by_prefix.items():
+                tasks.append(executor.submit(process_prefix_group, group_jpgs, nef_paths_by_prefix[prefix], verbose))
 
         for future in concurrent.futures.as_completed(tasks):
             try:
-                msg, deleted = future.result()
-                if msg:
-                    print(msg)
-                if deleted:
-                    deleted_count += 1
+                for msg, deleted in future.result():
+                    if msg:
+                        print(msg)
+                    if deleted:
+                        deleted_count += 1
             except Exception as e:
                 print(f"Error processing a file pair: {e}")
 
