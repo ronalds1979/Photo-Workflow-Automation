@@ -10,15 +10,24 @@ from PIL import Image, ImageOps
 # 🛡️ Sentinel: Explicitly bound maximum image pixels (~100MP) to prevent Decompression Bomb DoS attacks
 Image.MAX_IMAGE_PIXELS = 100_000_000
 
+# 🛡️ Sentinel: Explicitly bound maximum file size to prevent memory exhaustion / DoS when loading massive files
+MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024
+
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
 
 def get_jpg_hash(jpg_path):
+    if os.path.getsize(jpg_path) > MAX_FILE_SIZE_BYTES:
+        raise ValueError(f"File exceeds maximum size limit ({MAX_FILE_SIZE_BYTES} bytes)")
+
     with Image.open(jpg_path) as jpg_file:
         jpg_image = ImageOps.exif_transpose(jpg_file)
     return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
 def get_nef_hash(nef_path):
+    if os.path.getsize(nef_path) > MAX_FILE_SIZE_BYTES:
+        raise ValueError(f"File exceeds maximum size limit ({MAX_FILE_SIZE_BYTES} bytes)")
+
     with rawpy.imread(nef_path) as raw_file:
         thumbnail = raw_file.extract_thumb()
 
