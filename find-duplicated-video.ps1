@@ -35,59 +35,104 @@ Write-Host ""
 Write-Host "Scanning drive..."
 Write-Host ""
 
-# Read all video files once
-# ⚡ Bolt: Removed `| Where-Object` pipeline overhead and used a List for efficient appends
-$AllVideos = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-foreach ($file in Get-ChildItem -LiteralPath $DriveRoot -File -Recurse -ErrorAction SilentlyContinue) {
-    if ($VideoExtensions.Contains($file.Extension)) {
-        $AllVideos.Add($file)
+# ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) to reject non-matching same-size videos without reading multi-GB files
+function Get-FastPartialHash {
+    param([string]$LiteralPath)
+    $chunkSize = 65536
+    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $len = $stream.Length
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $buffer = New-Object byte[] $chunkSize
+            $read = $stream.Read($buffer, 0, $chunkSize)
+            if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
+
+            if ($len -gt ($chunkSize * 2)) {
+                $stream.Position = [long](($len - $chunkSize) / 2)
+                $read = $stream.Read($buffer, 0, $chunkSize)
+                if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
+            }
+            if ($len -gt $chunkSize) {
+                $stream.Position = [Math]::Max(0L, $len - $chunkSize)
+                $read = $stream.Read($buffer, 0, $chunkSize)
+                if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
+            }
+
+            $sha.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
+            return [System.BitConverter]::ToString($sha.Hash).Replace("-", "")
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
     }
 }
 
-Write-Host "Found $($AllVideos.Count) video files."
-Write-Host ""
-
-# Group by filename
-# ⚡ Bolt: Using -AsHashTable -AsString changes lookup complexity from O(N²) to O(1)
-$VideosByName = $AllVideos | Group-Object Name -AsHashTable -AsString
-
-# 🛡️ Sentinel: Enforce directory boundary and case-insensitive matching to prevent path confusion (e.g. matching "D:\Folder_Secret" when checking "D:\Folder")
+# 🛡️ Sentinel: Enforce directory boundary and case-insensitive matching to prevent path confusion
 $FolderToCheckNormalized = $FolderToCheck.TrimEnd('\') + '\'
 
-# Only videos inside the folder being cleaned
-# ⚡ Bolt: Removed `| Where-Object` pipeline overhead
+# ⚡ Bolt: Single-pass scan populating both $VideosByName and $VideosToCheck without extra Group-Object/foreach passes
+$VideosByName = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $VideosToCheck = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-foreach ($video in $AllVideos) {
-    if ($video.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $VideosToCheck.Add($video)
+$TotalVideos = 0
+
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $enumOpts = [System.IO.EnumerationOptions]::new()
+    $enumOpts.RecurseSubdirectories = $true
+    $enumOpts.IgnoreInaccessible = $true
+    $files = [System.IO.DirectoryInfo]::new($DriveRoot).EnumerateFiles('*', $enumOpts)
+} else {
+    $files = Get-ChildItem -LiteralPath $DriveRoot -File -Recurse -ErrorAction SilentlyContinue
+}
+
+foreach ($file in $files) {
+    if ($VideoExtensions.Contains($file.Extension)) {
+        $TotalVideos++
+        $list = $null
+        if (-not $VideosByName.TryGetValue($file.Name, [ref]$list)) {
+            $list = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+            $VideosByName[$file.Name] = $list
+        }
+        $list.Add($file)
+        if ($file.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $VideosToCheck.Add($file)
+        }
     }
 }
 
+Write-Host "Found $TotalVideos video files."
+Write-Host ""
 Write-Host "Checking $($VideosToCheck.Count) videos..."
 Write-Host ""
 
-# ⚡ Bolt: Cache hashes to avoid recalculating for large video files
+# ⚡ Bolt: Cache partial and full hashes to avoid recalculating for large video files
+$PartialHashes = @{}
 $FileHashes = @{}
 $MovedFiles = @{}
 
 $VideoIndex = 0
 $TotalVideosToCheck = $VideosToCheck.Count
+$LastPercent = -1
 
 foreach ($Video in $VideosToCheck) {
     $VideoIndex++
-    if ($TotalVideosToCheck -gt 0) {
-        $Percent = [int](($VideoIndex / $TotalVideosToCheck) * 100)
-        Write-Progress -Activity "Checking for duplicate videos" -Status "$VideoIndex of $TotalVideosToCheck ($($Video.Name))" -PercentComplete $Percent
-    }
 
     if ($MovedFiles.ContainsKey($Video.FullName)) { continue }
 
     # ⚡ Bolt: Fast hash table lookup instead of filtering the whole collection
-    # ⚡ Bolt: Avoided pipeline (Where-Object) overhead by filtering directly inside the loop
     $AllCandidatesForName = $VideosByName[$Video.Name]
 
-    # ⚡ Bolt: Early return to avoid slow Write-Host I/O and loop setup if there are no duplicates to check
+    # ⚡ Bolt: Early return before Write-Progress and Write-Host I/O if there are no duplicates to check
     if ($AllCandidatesForName.Count -le 1) { continue }
+
+    if ($TotalVideosToCheck -gt 0) {
+        $Percent = [int](($VideoIndex / $TotalVideosToCheck) * 100)
+        if ($Percent -ne $LastPercent) {
+            $LastPercent = $Percent
+            Write-Progress -Activity "Checking for duplicate videos" -Status "$VideoIndex of $TotalVideosToCheck ($($Video.Name))" -PercentComplete $Percent
+        }
+    }
 
     Write-Host "Checking: $($Video.Name)"
 
@@ -102,6 +147,16 @@ foreach ($Video in $VideosToCheck) {
         }
 
         try {
+            if (-not $PartialHashes.ContainsKey($Video.FullName)) {
+                $PartialHashes[$Video.FullName] = Get-FastPartialHash -LiteralPath $Video.FullName
+            }
+            if (-not $PartialHashes.ContainsKey($Candidate.FullName)) {
+                $PartialHashes[$Candidate.FullName] = Get-FastPartialHash -LiteralPath $Candidate.FullName
+            }
+            if ($PartialHashes[$Video.FullName] -ne $PartialHashes[$Candidate.FullName]) {
+                continue
+            }
+
             if (-not $FileHashes.ContainsKey($Video.FullName)) {
                 $FileHashes[$Video.FullName] = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
             }

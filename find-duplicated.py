@@ -16,7 +16,7 @@ MIN_HASH_SIMILARITY = 0.98
 def get_jpg_hash(jpg_path):
     with Image.open(jpg_path) as jpg_file:
         # ⚡ Bolt: Use libjpeg DCT downscaling + grayscale draft mode before EXIF transpose (phash resizes to 128x128)
-        jpg_file.draft("L", (512, 512))
+        jpg_file.draft("L", (256, 256))
         jpg_image = ImageOps.exif_transpose(jpg_file)
     return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
@@ -27,10 +27,11 @@ def get_nef_hash(nef_path):
     if thumbnail.format == rawpy.ThumbFormat.JPEG:
         with Image.open(io.BytesIO(thumbnail.data)) as preview_file:
             # ⚡ Bolt: Downscale full-res embedded NEF JPEG previews during decode
-            preview_file.draft("L", (512, 512))
+            preview_file.draft("L", (256, 256))
             nef_image = ImageOps.exif_transpose(preview_file)
     elif thumbnail.format == rawpy.ThumbFormat.BITMAP:
-        nef_image = Image.fromarray(thumbnail.data)
+        nef_image = Image.fromarray(thumbnail.data).convert("L")
+        nef_image.thumbnail((256, 256), Image.Resampling.BILINEAR)
     else:
         raise ValueError(f"Unsupported NEF preview format: {thumbnail.format}")
 
@@ -100,59 +101,83 @@ def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False):
         results.append(process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=nef_hash_cache, dry_run=dry_run))
     return results
 
+def process_prefix_batch(batch, verbose, dry_run=False):
+    batch_results = []
+    for group_jpgs, nef_paths in batch:
+        batch_results.extend(process_prefix_group(group_jpgs, nef_paths, verbose, dry_run=dry_run))
+    return batch_results
+
 def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
     deleted_count = 0
-    tasks = []
+    work_items = []
 
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        stack = [directory]
-        while stack:
-            current_dir = stack.pop()
-            try:
-                with os.scandir(current_dir) as it:
-                    entries = list(it)
-            except OSError:
+    stack = [directory]
+    while stack:
+        current_dir = stack.pop()
+        try:
+            with os.scandir(current_dir) as it:
+                entries = list(it)
+        except OSError:
+            continue
+
+        nef_paths_by_prefix = {}
+        jpg_entries = []
+
+        # ⚡ Bolt: Consolidated two iterations over `files` into a single pass via os.scandir.
+        for entry in entries:
+            if entry.is_symlink():
                 continue
 
-            nef_paths_by_prefix = {}
-            jpg_paths = []
-
-            # ⚡ Bolt: Consolidated two iterations over `files` into a single pass.
-            # This avoids redundant `os.path.islink` checks which cause slow `stat` system calls,
-            # halving the I/O discovery overhead.
-            # ⚡ Bolt: Replaced os.walk with os.scandir stack-based traversal to use entry.is_symlink()
-            # and entry.is_dir()/is_file(), eliminating implicit `stat` overhead in os.walk and os.path.
-            for entry in entries:
-                if entry.is_symlink():
+            if entry.is_dir():
+                stack.append(entry.path)
+            elif entry.is_file():
+                name = entry.name
+                # ⚡ Bolt: Fast-path length check before os.path.splitext() and .casefold().
+                if len(name) <= 13:
                     continue
+                stem, extension = os.path.splitext(name)
+                ext_lower = extension.casefold()
 
-                if entry.is_dir():
-                    stack.append(entry.path)
-                elif entry.is_file():
-                    name = entry.name
-                    # ⚡ Bolt: Fast-path length check before os.path.splitext() and .casefold().
-                    # A valid stem > 9 chars plus a 4-char extension (.nef/.jpg) requires len > 13.
-                    if len(name) <= 13:
-                        continue
-                    stem, extension = os.path.splitext(name)
-                    ext_lower = extension.casefold()
+                if ext_lower == ".nef":
+                    prefix = stem[:-9].casefold()
+                    nef_paths_by_prefix.setdefault(prefix, []).append(entry.path)
+                elif ext_lower == ".jpg":
+                    jpg_entries.append((entry.path, stem))
 
-                    if ext_lower == ".nef":
-                        prefix = stem[:-9].casefold()
-                        nef_paths_by_prefix.setdefault(prefix, []).append(entry.path)
-                    elif ext_lower == ".jpg":
-                        jpg_paths.append((entry.path, stem[:-9].casefold()))
+        # ⚡ Bolt: Skip JPG prefix computation entirely in folders with no NEF files
+        if not nef_paths_by_prefix:
+            continue
 
-            jpgs_by_prefix = {}
-            for jpg_path, prefix in jpg_paths:
-                if prefix in nef_paths_by_prefix:
-                    jpgs_by_prefix.setdefault(prefix, []).append(jpg_path)
+        jpgs_by_prefix = {}
+        for jpg_path, stem in jpg_entries:
+            prefix = stem[:-9].casefold()
+            if prefix in nef_paths_by_prefix:
+                jpgs_by_prefix.setdefault(prefix, []).append(jpg_path)
 
-            for prefix, group_jpgs in jpgs_by_prefix.items():
-                tasks.append(executor.submit(process_prefix_group, group_jpgs, nef_paths_by_prefix[prefix], verbose, dry_run))
+        for prefix, group_jpgs in jpgs_by_prefix.items():
+            work_items.append((group_jpgs, nef_paths_by_prefix[prefix]))
 
-        total_tasks = len(tasks)
-        for completed, future in enumerate(concurrent.futures.as_completed(tasks), start=1):
+    if not work_items:
+        return 0
+
+    # ⚡ Bolt: Avoid ProcessPoolExecutor spawn overhead for single-group runs
+    if len(work_items) == 1:
+        group_jpgs, nef_paths = work_items[0]
+        for msg, deleted in process_prefix_group(group_jpgs, nef_paths, verbose, dry_run):
+            if msg:
+                print(msg)
+            if deleted:
+                deleted_count += 1
+        return deleted_count
+
+    # ⚡ Bolt: Batch prefix groups per future to cut IPC pickling and Future allocation overhead
+    batch_size = 8
+    batches = [work_items[i:i + batch_size] for i in range(0, len(work_items), batch_size)]
+    total_batches = len(batches)
+
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [executor.submit(process_prefix_batch, batch, verbose, dry_run) for batch in batches]
+        for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             try:
                 for msg, deleted in future.result():
                     if msg:
@@ -161,8 +186,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
                         deleted_count += 1
             except Exception as e:
                 print(f"Error processing a file pair: {e}")
-            if total_tasks >= 10 and (completed % 25 == 0 or completed == total_tasks):
-                print(f"Progress: {completed}/{total_tasks} prefix group(s) checked...")
+            if total_batches >= 10 and (completed % 10 == 0 or completed == total_batches):
+                print(f"Progress: {completed}/{total_batches} batch(es) checked...")
 
     return deleted_count
 
