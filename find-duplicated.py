@@ -39,7 +39,7 @@ def get_nef_hash(nef_path):
 def compare_hashes(jpg_hash, nef_hash):
     return 1 - (jpg_hash - nef_hash) / jpg_hash.hash.size
 
-def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None):
+def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None, dry_run=False):
     best_similarity = None
 
     # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
@@ -71,6 +71,8 @@ def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None):
             break
 
     if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
+        if dry_run:
+            return f"[DRY-RUN] Would delete: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
         try:
             os.remove(jpg_path)
         except OSError as e:
@@ -90,15 +92,15 @@ def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None):
 
     return None, False
 
-def process_prefix_group(jpg_paths, nef_paths, verbose):
+def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False):
     # ⚡ Bolt: Cache NEF hashes across JPGs sharing the same prefix in a directory
     nef_hash_cache = {} if len(jpg_paths) > 1 else None
     results = []
     for jpg_path in jpg_paths:
-        results.append(process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=nef_hash_cache))
+        results.append(process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=nef_hash_cache, dry_run=dry_run))
     return results
 
-def delete_jpgs_with_nef_pairs(directory, verbose=False):
+def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
     deleted_count = 0
     tasks = []
 
@@ -147,9 +149,10 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                     jpgs_by_prefix.setdefault(prefix, []).append(jpg_path)
 
             for prefix, group_jpgs in jpgs_by_prefix.items():
-                tasks.append(executor.submit(process_prefix_group, group_jpgs, nef_paths_by_prefix[prefix], verbose))
+                tasks.append(executor.submit(process_prefix_group, group_jpgs, nef_paths_by_prefix[prefix], verbose, dry_run))
 
-        for future in concurrent.futures.as_completed(tasks):
+        total_tasks = len(tasks)
+        for completed, future in enumerate(concurrent.futures.as_completed(tasks), start=1):
             try:
                 for msg, deleted in future.result():
                     if msg:
@@ -158,6 +161,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False):
                         deleted_count += 1
             except Exception as e:
                 print(f"Error processing a file pair: {e}")
+            if total_tasks >= 10 and (completed % 25 == 0 or completed == total_tasks):
+                print(f"Progress: {completed}/{total_tasks} prefix group(s) checked...")
 
     return deleted_count
 
@@ -173,15 +178,19 @@ def main():
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Show each deleted JPG file"
     )
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="Preview matching JPGs without deleting them"
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.folder):
         parser.error(f"not a folder: {args.folder}")
 
     try:
-        deleted_count = delete_jpgs_with_nef_pairs(args.folder, verbose=args.verbose)
+        deleted_count = delete_jpgs_with_nef_pairs(args.folder, verbose=args.verbose, dry_run=args.dry_run)
+        action_word = "Would delete" if args.dry_run else "Deleted"
         print(
-            f"Deleted {deleted_count} .jpg file(s) with at least "
+            f"{action_word} {deleted_count} .jpg file(s) with at least "
             f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity."
         )
     except KeyboardInterrupt:

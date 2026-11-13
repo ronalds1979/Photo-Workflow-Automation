@@ -1,21 +1,26 @@
-# ====================================================================
+﻿# ====================================================================
 # FIND AND REMOVE DUPLICATE VIDEOS
 # Keeps the copy outside the target folder
 # Moves duplicates to a quarantine folder for safety
 # ====================================================================
 
-$FolderToCheck = "D:\Other files and trash videos"
-$DriveRoot = "D:\"
-$QuarantineFolder = "D:\DuplicateVideosFound"
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [string]$FolderToCheck = "D:\Other files and trash videos",
+    [string]$DriveRoot = "D:\",
+    [string]$QuarantineFolder = "D:\DuplicateVideosFound"
+)
 
 # Create quarantine folder if missing
 if (!(Test-Path -LiteralPath $QuarantineFolder)) {
-    try {
-        New-Item -ItemType Directory -LiteralPath $QuarantineFolder -ErrorAction Stop | Out-Null
-    }
-    catch {
-        Write-Error "Failed to create quarantine folder: $($_.Exception.Message)"
-        exit
+    if ($PSCmdlet.ShouldProcess($QuarantineFolder, "Create quarantine directory")) {
+        try {
+            New-Item -ItemType Directory -LiteralPath $QuarantineFolder -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-Error "Failed to create quarantine folder: $($_.Exception.Message)"
+            exit
+        }
     }
 }
 
@@ -65,7 +70,15 @@ Write-Host ""
 $FileHashes = @{}
 $MovedFiles = @{}
 
+$VideoIndex = 0
+$TotalVideosToCheck = $VideosToCheck.Count
+
 foreach ($Video in $VideosToCheck) {
+    $VideoIndex++
+    if ($TotalVideosToCheck -gt 0) {
+        $Percent = [int](($VideoIndex / $TotalVideosToCheck) * 100)
+        Write-Progress -Activity "Checking for duplicate videos" -Status "$VideoIndex of $TotalVideosToCheck ($($Video.Name))" -PercentComplete $Percent
+    }
 
     if ($MovedFiles.ContainsKey($Video.FullName)) { continue }
 
@@ -122,13 +135,15 @@ foreach ($Video in $VideosToCheck) {
                     $Counter++
                 }
 
-                Move-Item `
-                    -LiteralPath $Video.FullName `
-                    -Destination $Destination `
-                    -ErrorAction Stop
+                if ($PSCmdlet.ShouldProcess($Video.FullName, "Move duplicate video to $Destination")) {
+                    Move-Item `
+                        -LiteralPath $Video.FullName `
+                        -Destination $Destination `
+                        -ErrorAction Stop
 
-                # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
-                $MovedFiles[$Video.FullName] = $true
+                    # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
+                    $MovedFiles[$Video.FullName] = $true
+                }
 
                 break
             }
