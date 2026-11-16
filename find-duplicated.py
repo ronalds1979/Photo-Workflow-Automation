@@ -231,30 +231,31 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
     if not work_items:
         return 0
 
-    # ⚡ Bolt: Avoid ProcessPoolExecutor spawn overhead for single-group runs
-    if len(work_items) == 1:
-        group_jpgs, nef_paths = work_items[0]
-        for msg, deleted in process_prefix_group(
-            group_jpgs,
-            nef_paths,
-            verbose,
-            dry_run=dry_run,
-            delete=delete,
-            root_dir=root_dir,
-            quarantine_dir=quarantine_dir_abs,
-        ):
-            if msg:
-                print(msg)
-            if deleted:
-                deleted_count += 1
+    # ⚡ Bolt: Avoid ProcessPoolExecutor spawn + heavy scientific import overhead (~0.45s/worker on Windows) for small workloads
+    if len(work_items) < 16:
+        for group_jpgs, nef_paths in work_items:
+            for msg, deleted in process_prefix_group(
+                group_jpgs,
+                nef_paths,
+                verbose,
+                dry_run=dry_run,
+                delete=delete,
+                root_dir=root_dir,
+                quarantine_dir=quarantine_dir_abs,
+            ):
+                if msg:
+                    print(msg)
+                if deleted:
+                    deleted_count += 1
         return deleted_count
 
     # ⚡ Bolt: Batch prefix groups per future to cut IPC pickling and Future allocation overhead
     batch_size = 8
     batches = [work_items[i:i + batch_size] for i in range(0, len(work_items), batch_size)]
     total_batches = len(batches)
+    max_workers = min(os.cpu_count() or 1, total_batches)
 
-    with concurrent.futures.ProcessPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
                 process_prefix_batch,

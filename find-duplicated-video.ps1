@@ -87,23 +87,54 @@ function Get-FastPartialHash {
     try {
         $len = $stream.Length
         $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
-        if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+        if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
 
         if ($len -gt ($PartialChunkSize * 2)) {
             $stream.Position = [long](($len - $PartialChunkSize) / 2)
             $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
-            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+            if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
         if ($len -gt $PartialChunkSize) {
             $stream.Position = [Math]::Max(0L, $len - $PartialChunkSize)
             $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
-            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+            if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
 
-        $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
+        $null = $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
         return [System.BitConverter]::ToString($PartialSha256.Hash).Replace("-", "")
     } finally {
         $stream.Dispose()
+    }
+}
+
+# ⚡ Bolt: Streaming 1 MB block comparison with early exit on first mismatched chunk (avoids full-file SHA-256 I/O & CPU)
+$CompareBufferSize = 1048576
+$CompareBuf1 = New-Object byte[] $CompareBufferSize
+$CompareBuf2 = New-Object byte[] $CompareBufferSize
+
+function Compare-FilesExact {
+    param([string]$Path1, [string]$Path2)
+    $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $s2 = $null
+    try {
+        $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($s1.Length -ne $s2.Length) { return $false }
+        while ($true) {
+            $r1 = $s1.Read($CompareBuf1, 0, $CompareBufferSize)
+            $r2 = $s2.Read($CompareBuf2, 0, $CompareBufferSize)
+            if ($r1 -ne $r2) { return $false }
+            if ($r1 -eq 0) { return $true }
+            if ($r1 -eq $CompareBufferSize) {
+                if (-not [System.Linq.Enumerable]::SequenceEqual($CompareBuf1, $CompareBuf2)) { return $false }
+            } else {
+                $seg1 = [System.ArraySegment[byte]]::new($CompareBuf1, 0, $r1)
+                $seg2 = [System.ArraySegment[byte]]::new($CompareBuf2, 0, $r2)
+                if (-not [System.Linq.Enumerable]::SequenceEqual($seg1, $seg2)) { return $false }
+            }
+        }
+    } finally {
+        if ($s2) { $s2.Dispose() }
+        $s1.Dispose()
     }
 }
 
@@ -111,8 +142,8 @@ function Get-FastPartialHash {
 $FolderToCheckNormalized = $FolderToCheck.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 $QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 
-# ⚡ Bolt: Single-pass scan populating both $VideosByName and $VideosToCheck without extra Group-Object/foreach passes
-$VideosByName = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+# ⚡ Bolt: Composite key (Name|Length) eliminates camera filename collisions (e.g. C0001.MP4) before console/progress I/O
+$VideosByNameAndLength = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $VideosToCheck = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 $TotalVideos = 0
 
@@ -135,10 +166,11 @@ try {
         }
         if ($VideoExtensions.Contains($file.Extension)) {
             $TotalVideos++
+            $key = "$($file.Name)|$($file.Length)"
             $list = $null
-            if (-not $VideosByName.TryGetValue($file.Name, [ref]$list)) {
+            if (-not $VideosByNameAndLength.TryGetValue($key, [ref]$list)) {
                 $list = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-                $VideosByName[$file.Name] = $list
+                $VideosByNameAndLength[$key] = $list
             }
             $list.Add($file)
             if ($file.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -157,9 +189,8 @@ Write-Host ""
 Write-Host "Checking $($VideosToCheck.Count) videos..."
 Write-Host ""
 
-# ⚡ Bolt: Cache partial and full hashes to avoid recalculating for large video files
+# ⚡ Bolt: Cache partial hashes to avoid recalculating for candidate video files
 $PartialHashes = @{}
-$FileHashes = @{}
 $MovedFiles = @{}
 
 $VideoIndex = 0
@@ -171,10 +202,10 @@ foreach ($Video in $VideosToCheck) {
 
     if ($MovedFiles.ContainsKey($Video.FullName)) { continue }
 
-    # ⚡ Bolt: Fast hash table lookup instead of filtering the whole collection
-    $AllCandidatesForName = $VideosByName[$Video.Name]
+    # ⚡ Bolt: O(1) composite Name|Length lookup skips unrelated size collisions before Write-Progress/Write-Host
+    $AllCandidatesForName = $VideosByNameAndLength["$($Video.Name)|$($Video.Length)"]
 
-    # ⚡ Bolt: Early return before Write-Progress and Write-Host I/O if there are no duplicates to check
+    # ⚡ Bolt: Early return before Write-Progress and Write-Host I/O if there are no size-matching duplicates to check
     if ($AllCandidatesForName.Count -le 1) { continue }
 
     if ($TotalVideosToCheck -gt 0) {
@@ -192,11 +223,6 @@ foreach ($Video in $VideosToCheck) {
         if ($Candidate.FullName -eq $Video.FullName) { continue }
         if ($MovedFiles.ContainsKey($Candidate.FullName)) { continue }
 
-        # Quick size comparison first
-        if ($Video.Length -ne $Candidate.Length) {
-            continue
-        }
-
         try {
             if (-not $PartialHashes.ContainsKey($Video.FullName)) {
                 $PartialHashes[$Video.FullName] = Get-FastPartialHash -LiteralPath $Video.FullName
@@ -208,17 +234,10 @@ foreach ($Video in $VideosToCheck) {
                 continue
             }
 
-            if (-not $FileHashes.ContainsKey($Video.FullName)) {
-                $FileHashes[$Video.FullName] = (Get-FileHash -LiteralPath $Video.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-            }
-            if (-not $FileHashes.ContainsKey($Candidate.FullName)) {
-                $FileHashes[$Candidate.FullName] = (Get-FileHash -LiteralPath $Candidate.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-            }
+            # ⚡ Bolt: Files <= 192 KB are already 100% covered by Get-FastPartialHash; larger files use streaming early-exit comparison
+            $isExactMatch = ($Video.Length -le ($PartialChunkSize * 3)) -or (Compare-FilesExact -Path1 $Video.FullName -Path2 $Candidate.FullName)
 
-            $Hash1 = $FileHashes[$Video.FullName]
-            $Hash2 = $FileHashes[$Candidate.FullName]
-
-            if ($Hash1 -eq $Hash2) {
+            if ($isExactMatch) {
 
                 Write-Host ""
                 Write-Host "DUPLICATE FOUND" -ForegroundColor Yellow

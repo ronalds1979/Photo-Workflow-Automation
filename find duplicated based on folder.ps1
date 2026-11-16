@@ -66,23 +66,54 @@ function Get-FastPartialHash {
     try {
         $len = $stream.Length
         $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
-        if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+        if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
 
         if ($len -gt ($PartialChunkSize * 2)) {
             $stream.Position = [long](($len - $PartialChunkSize) / 2)
             $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
-            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+            if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
         if ($len -gt $PartialChunkSize) {
             $stream.Position = [Math]::Max(0L, $len - $PartialChunkSize)
             $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
-            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+            if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
 
-        $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
+        $null = $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
         return [System.BitConverter]::ToString($PartialSha256.Hash).Replace("-", "")
     } finally {
         $stream.Dispose()
+    }
+}
+
+# ⚡ Bolt: Streaming 1 MB block comparison with early exit for single-candidate checks
+$CompareBufferSize = 1048576
+$CompareBuf1 = New-Object byte[] $CompareBufferSize
+$CompareBuf2 = New-Object byte[] $CompareBufferSize
+
+function Compare-FilesExact {
+    param([string]$Path1, [string]$Path2)
+    $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $s2 = $null
+    try {
+        $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        if ($s1.Length -ne $s2.Length) { return $false }
+        while ($true) {
+            $r1 = $s1.Read($CompareBuf1, 0, $CompareBufferSize)
+            $r2 = $s2.Read($CompareBuf2, 0, $CompareBufferSize)
+            if ($r1 -ne $r2) { return $false }
+            if ($r1 -eq 0) { return $true }
+            if ($r1 -eq $CompareBufferSize) {
+                if (-not [System.Linq.Enumerable]::SequenceEqual($CompareBuf1, $CompareBuf2)) { return $false }
+            } else {
+                $seg1 = [System.ArraySegment[byte]]::new($CompareBuf1, 0, $r1)
+                $seg2 = [System.ArraySegment[byte]]::new($CompareBuf2, 0, $r2)
+                if (-not [System.Linq.Enumerable]::SequenceEqual($seg1, $seg2)) { return $false }
+            }
+        }
+    } finally {
+        if ($s2) { $s2.Dispose() }
+        $s1.Dispose()
     }
 }
 
@@ -158,6 +189,13 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
                 # All bytes of files <= 192 KB were already covered by Get-FastPartialHash
                 $matchFound = $true
                 foreach ($refFile in $partialMatches) {
+                    $matchingFiles.Add($refFile)
+                }
+            } elseif ($partialMatches.Count -eq 1) {
+                # ⚡ Bolt: Streaming early-exit comparison avoids full-file SHA-256 hashing for single-candidate checks
+                $refFile = $partialMatches[0]
+                if (Compare-FilesExact -Path1 $file.FullName -Path2 $refFile) {
+                    $matchFound = $true
                     $matchingFiles.Add($refFile)
                 }
             } else {
