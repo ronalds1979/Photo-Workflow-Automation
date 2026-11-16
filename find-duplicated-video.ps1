@@ -76,35 +76,32 @@ Write-Host ""
 Write-Host "Scanning drive..."
 Write-Host ""
 
-# ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) to reject non-matching same-size videos without reading multi-GB files
+# ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) with reusable buffer & SHA256 instance
+$PartialChunkSize = 65536
+$PartialHashBuffer = New-Object byte[] $PartialChunkSize
+$PartialSha256 = [System.Security.Cryptography.SHA256]::Create()
+
 function Get-FastPartialHash {
     param([string]$LiteralPath)
-    $chunkSize = 65536
     $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $len = $stream.Length
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $buffer = New-Object byte[] $chunkSize
-            $read = $stream.Read($buffer, 0, $chunkSize)
-            if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
+        $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+        if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
 
-            if ($len -gt ($chunkSize * 2)) {
-                $stream.Position = [long](($len - $chunkSize) / 2)
-                $read = $stream.Read($buffer, 0, $chunkSize)
-                if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
-            }
-            if ($len -gt $chunkSize) {
-                $stream.Position = [Math]::Max(0L, $len - $chunkSize)
-                $read = $stream.Read($buffer, 0, $chunkSize)
-                if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
-            }
-
-            $sha.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
-            return [System.BitConverter]::ToString($sha.Hash).Replace("-", "")
-        } finally {
-            $sha.Dispose()
+        if ($len -gt ($PartialChunkSize * 2)) {
+            $stream.Position = [long](($len - $PartialChunkSize) / 2)
+            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
         }
+        if ($len -gt $PartialChunkSize) {
+            $stream.Position = [Math]::Max(0L, $len - $PartialChunkSize)
+            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+        }
+
+        $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
+        return [System.BitConverter]::ToString($PartialSha256.Hash).Replace("-", "")
     } finally {
         $stream.Dispose()
     }
@@ -264,6 +261,8 @@ foreach ($Video in $VideosToCheck) {
         }
     }
 }
+
+$PartialSha256.Dispose()
 
 Write-Host ""
 Write-Host "Finished."

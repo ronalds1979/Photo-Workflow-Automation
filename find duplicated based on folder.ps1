@@ -55,35 +55,32 @@ $QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::
 
 Write-Host "Building size and hash index for reference folder..."
 
-# ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) to reject non-matching same-size files before full SHA-256
+# ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) with reusable buffer & SHA256 instance
+$PartialChunkSize = 65536
+$PartialHashBuffer = New-Object byte[] $PartialChunkSize
+$PartialSha256 = [System.Security.Cryptography.SHA256]::Create()
+
 function Get-FastPartialHash {
     param([string]$LiteralPath)
-    $chunkSize = 65536
     $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $len = $stream.Length
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $buffer = New-Object byte[] $chunkSize
-            $read = $stream.Read($buffer, 0, $chunkSize)
-            if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
+        $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+        if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
 
-            if ($len -gt ($chunkSize * 2)) {
-                $stream.Position = [long](($len - $chunkSize) / 2)
-                $read = $stream.Read($buffer, 0, $chunkSize)
-                if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
-            }
-            if ($len -gt $chunkSize) {
-                $stream.Position = [Math]::Max(0L, $len - $chunkSize)
-                $read = $stream.Read($buffer, 0, $chunkSize)
-                if ($read -gt 0) { $sha.TransformBlock($buffer, 0, $read, $null, 0) | Out-Null }
-            }
-
-            $sha.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
-            return [System.BitConverter]::ToString($sha.Hash).Replace("-", "")
-        } finally {
-            $sha.Dispose()
+        if ($len -gt ($PartialChunkSize * 2)) {
+            $stream.Position = [long](($len - $PartialChunkSize) / 2)
+            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
         }
+        if ($len -gt $PartialChunkSize) {
+            $stream.Position = [Math]::Max(0L, $len - $PartialChunkSize)
+            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            if ($read -gt 0) { $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) | Out-Null }
+        }
+
+        $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0) | Out-Null
+        return [System.BitConverter]::ToString($PartialSha256.Hash).Replace("-", "")
     } finally {
         $stream.Dispose()
     }
@@ -133,10 +130,15 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
         $size = $file.Length
 
         if ($referenceFilesBySize.ContainsKey($size)) {
+            $candidates = $referenceFilesBySize[$size]
+            if ($candidates.Count -eq 1 -and $file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+
             $srcPartial = Get-FastPartialHash -LiteralPath $file.FullName
             $partialMatches = [System.Collections.Generic.List[string]]::new()
 
-            foreach ($refFile in $referenceFilesBySize[$size]) {
+            foreach ($refFile in $candidates) {
                 if ($file.FullName.Equals($refFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
                 if (-not $referencePartialHashes.ContainsKey($refFile)) {
                     $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile
@@ -148,20 +150,27 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
 
             if ($partialMatches.Count -eq 0) { continue }
 
-            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-
             $matchFound = $false
             # ⚡ Bolt: Using List[string] instead of @() for efficient O(1) appends
             $matchingFiles = [System.Collections.Generic.List[string]]::new()
 
-            foreach ($refFile in $partialMatches) {
-                if (-not $referenceHashes.ContainsKey($refFile)) {
-                    $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
-                }
-
-                if ($hash -eq $referenceHashes[$refFile]) {
-                    $matchFound = $true
+            if ($size -le ($PartialChunkSize * 3)) {
+                # All bytes of files <= 192 KB were already covered by Get-FastPartialHash
+                $matchFound = $true
+                foreach ($refFile in $partialMatches) {
                     $matchingFiles.Add($refFile)
+                }
+            } else {
+                $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                foreach ($refFile in $partialMatches) {
+                    if (-not $referenceHashes.ContainsKey($refFile)) {
+                        $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
+                    }
+
+                    if ($hash -eq $referenceHashes[$refFile]) {
+                        $matchFound = $true
+                        $matchingFiles.Add($refFile)
+                    }
                 }
             }
 
@@ -192,6 +201,8 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
         Write-Warning "Failed to process: $($file.FullName) - $($_.Exception.Message)"
     }
 }
+
+$PartialSha256.Dispose()
 
 $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
 try {
