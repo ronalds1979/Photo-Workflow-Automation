@@ -1,6 +1,7 @@
 import argparse
 import io
 import os
+import shutil
 import concurrent.futures
 
 import imagehash
@@ -30,6 +31,12 @@ def get_nef_hash(nef_path):
             preview_file.draft("L", (256, 256))
             nef_image = ImageOps.exif_transpose(preview_file)
     elif thumbnail.format == rawpy.ThumbFormat.BITMAP:
+        height, width = thumbnail.data.shape[:2]
+        if width * height > Image.MAX_IMAGE_PIXELS:
+            raise ValueError(
+                f"NEF bitmap thumbnail dimensions ({width}x{height}) exceed "
+                f"MAX_IMAGE_PIXELS ({Image.MAX_IMAGE_PIXELS})"
+            )
         nef_image = Image.fromarray(thumbnail.data).convert("L")
         nef_image.thumbnail((256, 256), Image.Resampling.BILINEAR)
     else:
@@ -40,7 +47,35 @@ def get_nef_hash(nef_path):
 def compare_hashes(jpg_hash, nef_hash):
     return 1 - (jpg_hash - nef_hash) / jpg_hash.hash.size
 
-def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None, dry_run=False):
+def _is_reparse_point(path):
+    is_junction = getattr(os.path, "isjunction", lambda _p: False)
+    return os.path.islink(path) or is_junction(path)
+
+def _quarantine_file(jpg_path, root_dir, quarantine_dir):
+    rel_path = os.path.relpath(jpg_path, root_dir)
+    if rel_path.startswith(".."):
+        rel_path = os.path.basename(jpg_path)
+    dest_path = os.path.join(quarantine_dir, rel_path)
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    base, ext = os.path.splitext(dest_path)
+    counter = 1
+    candidate = dest_path
+    while os.path.lexists(candidate):
+        candidate = f"{base}_{counter}{ext}"
+        counter += 1
+    shutil.move(jpg_path, candidate)
+    return candidate
+
+def process_jpg_file(
+    jpg_path,
+    nef_paths,
+    verbose,
+    nef_hash_cache=None,
+    dry_run=False,
+    delete=False,
+    root_dir=None,
+    quarantine_dir=None,
+):
     best_similarity = None
 
     # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
@@ -73,16 +108,23 @@ def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None, dry_run=
 
     if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
         if dry_run:
-            return f"[DRY-RUN] Would delete: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
+            verb = "delete" if delete else "quarantine"
+            return f"[DRY-RUN] Would {verb}: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
         try:
-            os.remove(jpg_path)
+            if delete:
+                os.remove(jpg_path)
+                action_msg = f"Deleted: {jpg_path}"
+            else:
+                dest_path = _quarantine_file(jpg_path, root_dir, quarantine_dir)
+                action_msg = f"Quarantined: {jpg_path} -> {dest_path}"
         except OSError as e:
             # Always return the error to be logged (even if not verbose,
-            # errors during deletion are important)
-            return f"Error: Failed to delete {jpg_path}: {e}", False
+            # errors during deletion/quarantine are important)
+            verb = "delete" if delete else "quarantine"
+            return f"Error: Failed to {verb} {jpg_path}: {e}", False
 
         if verbose:
-            return f"Deleted: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
+            return f"{action_msg} (perceptual hash similarity: {best_similarity:.2%})", True
         return None, True
     elif verbose:
         if best_similarity is None:
@@ -93,25 +135,51 @@ def process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=None, dry_run=
 
     return None, False
 
-def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False):
+def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None):
     # ⚡ Bolt: Cache NEF hashes across JPGs sharing the same prefix in a directory
     nef_hash_cache = {} if len(jpg_paths) > 1 else None
     results = []
     for jpg_path in jpg_paths:
-        results.append(process_jpg_file(jpg_path, nef_paths, verbose, nef_hash_cache=nef_hash_cache, dry_run=dry_run))
+        results.append(
+            process_jpg_file(
+                jpg_path,
+                nef_paths,
+                verbose,
+                nef_hash_cache=nef_hash_cache,
+                dry_run=dry_run,
+                delete=delete,
+                root_dir=root_dir,
+                quarantine_dir=quarantine_dir,
+            )
+        )
     return results
 
-def process_prefix_batch(batch, verbose, dry_run=False):
+def process_prefix_batch(batch, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None):
     batch_results = []
     for group_jpgs, nef_paths in batch:
-        batch_results.extend(process_prefix_group(group_jpgs, nef_paths, verbose, dry_run=dry_run))
+        batch_results.extend(
+            process_prefix_group(
+                group_jpgs,
+                nef_paths,
+                verbose,
+                dry_run=dry_run,
+                delete=delete,
+                root_dir=root_dir,
+                quarantine_dir=quarantine_dir,
+            )
+        )
     return batch_results
 
-def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
+def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=False, quarantine_dir=None):
+    root_dir = os.path.abspath(directory)
+    if not delete and quarantine_dir is None:
+        quarantine_dir = os.path.join(root_dir, "_duplicates_quarantine")
+    quarantine_dir_abs = os.path.abspath(quarantine_dir) if quarantine_dir else None
+
     deleted_count = 0
     work_items = []
 
-    stack = [directory]
+    stack = [root_dir]
     while stack:
         current_dir = stack.pop()
         try:
@@ -125,10 +193,13 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
 
         # ⚡ Bolt: Consolidated two iterations over `files` into a single pass via os.scandir.
         for entry in entries:
-            if entry.is_symlink():
+            is_junction = getattr(entry, "is_junction", lambda: False)
+            if entry.is_symlink() or is_junction():
                 continue
 
             if entry.is_dir():
+                if quarantine_dir_abs and os.path.abspath(entry.path) == quarantine_dir_abs:
+                    continue
                 stack.append(entry.path)
             elif entry.is_file():
                 name = entry.name
@@ -163,7 +234,15 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
     # ⚡ Bolt: Avoid ProcessPoolExecutor spawn overhead for single-group runs
     if len(work_items) == 1:
         group_jpgs, nef_paths = work_items[0]
-        for msg, deleted in process_prefix_group(group_jpgs, nef_paths, verbose, dry_run):
+        for msg, deleted in process_prefix_group(
+            group_jpgs,
+            nef_paths,
+            verbose,
+            dry_run=dry_run,
+            delete=delete,
+            root_dir=root_dir,
+            quarantine_dir=quarantine_dir_abs,
+        ):
             if msg:
                 print(msg)
             if deleted:
@@ -176,7 +255,18 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
     total_batches = len(batches)
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures = [executor.submit(process_prefix_batch, batch, verbose, dry_run) for batch in batches]
+        futures = [
+            executor.submit(
+                process_prefix_batch,
+                batch,
+                verbose,
+                dry_run=dry_run,
+                delete=delete,
+                root_dir=root_dir,
+                quarantine_dir=quarantine_dir_abs,
+            )
+            for batch in batches
+        ]
         for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             try:
                 for msg, deleted in future.result():
@@ -194,28 +284,65 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Delete JPG files paired with NEFs in the same folder when their "
-            "perceptual hashes match by at least 98%, ignoring the last 9 "
-            "filename-stem characters."
+            "Quarantine (or delete with --delete --yes) JPG files paired with NEFs in the "
+            "same folder when their perceptual hashes match by at least 98%, ignoring the "
+            "last 9 filename-stem characters."
         )
     )
     parser.add_argument("folder", help="Folder to scan recursively")
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Show each deleted JPG file"
+        "-v", "--verbose", action="store_true", help="Show each processed JPG file"
     )
     parser.add_argument(
-        "-n", "--dry-run", action="store_true", help="Preview matching JPGs without deleting them"
+        "-n", "--dry-run", action="store_true", help="Preview matching JPGs without moving or deleting them"
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "-q",
+        "--quarantine",
+        help="Move matching JPGs to this quarantine directory (default: <folder>/_duplicates_quarantine)",
+    )
+    mode_group.add_argument(
+        "--delete",
+        action="store_true",
+        help="Permanently delete matching JPGs instead of quarantining (requires --yes)",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Confirm permanent deletion when --delete is specified",
     )
     args = parser.parse_args()
 
     if not os.path.isdir(args.folder):
         parser.error(f"not a folder: {args.folder}")
+    if _is_reparse_point(args.folder):
+        parser.error(f"refusing to scan symlink or junction: {args.folder}")
+
+    if args.delete and not args.yes and not args.dry_run:
+        parser.error("--delete requires --yes to permanently delete files without quarantine.")
+
+    if args.quarantine and os.path.exists(args.quarantine):
+        if _is_reparse_point(args.quarantine):
+            parser.error(f"quarantine directory must not be a symlink or junction: {args.quarantine}")
+        if not os.path.isdir(args.quarantine):
+            parser.error(f"quarantine path exists and is not a folder: {args.quarantine}")
 
     try:
-        deleted_count = delete_jpgs_with_nef_pairs(args.folder, verbose=args.verbose, dry_run=args.dry_run)
-        action_word = "Would delete" if args.dry_run else "Deleted"
+        processed_count = delete_jpgs_with_nef_pairs(
+            args.folder,
+            verbose=args.verbose,
+            dry_run=args.dry_run,
+            delete=args.delete,
+            quarantine_dir=args.quarantine,
+        )
+        if args.dry_run:
+            action_word = "Would delete" if args.delete else "Would quarantine"
+        else:
+            action_word = "Deleted" if args.delete else "Quarantined"
         print(
-            f"{action_word} {deleted_count} .jpg file(s) with at least "
+            f"{action_word} {processed_count} .jpg file(s) with at least "
             f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity."
         )
     except KeyboardInterrupt:

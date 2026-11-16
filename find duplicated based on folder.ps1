@@ -1,16 +1,57 @@
-﻿$SourceFolder = "D:\Other files and trash videos"
-$ReferenceFolder = "D:\Original\Pictures"
-$QuarantineFolder = "D:\DuplicateFilesFound"
+﻿[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [string]$SourceFolder = "D:\Other files and trash videos",
+    [string]$ReferenceFolder = "D:\Original\Pictures",
+    [string]$QuarantineFolder = "D:\DuplicateFilesFound"
+)
 
-if (!(Test-Path -LiteralPath $QuarantineFolder)) {
+if ([string]::IsNullOrWhiteSpace($SourceFolder) -or -not (Test-Path -LiteralPath $SourceFolder -PathType Container)) {
+    Write-Error "Source folder does not exist or is not a directory: $SourceFolder"
+    exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($ReferenceFolder) -or -not (Test-Path -LiteralPath $ReferenceFolder -PathType Container)) {
+    Write-Error "Reference folder does not exist or is not a directory: $ReferenceFolder"
+    exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($QuarantineFolder)) {
+    Write-Error "Quarantine folder path cannot be empty."
+    exit 1
+}
+
+$SourceFolder = [System.IO.Path]::GetFullPath($SourceFolder)
+$ReferenceFolder = [System.IO.Path]::GetFullPath($ReferenceFolder)
+$QuarantineFolder = [System.IO.Path]::GetFullPath($QuarantineFolder)
+
+if (Test-Path -LiteralPath $QuarantineFolder) {
+    try {
+        $quarantineItem = Get-Item -LiteralPath $QuarantineFolder -Force -ErrorAction Stop
+        if (-not $quarantineItem.PSIsContainer) {
+            Write-Error "Quarantine path exists and is not a directory: $QuarantineFolder"
+            exit 1
+        }
+        if (($quarantineItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Write-Error "Quarantine folder must not be a reparse point (symlink/junction): $QuarantineFolder"
+            exit 1
+        }
+    }
+    catch {
+        Write-Error "Failed to inspect quarantine folder: $($_.Exception.Message)"
+        exit 1
+    }
+}
+elseif ($PSCmdlet.ShouldProcess($QuarantineFolder, "Create quarantine directory")) {
     try {
         New-Item -ItemType Directory -LiteralPath $QuarantineFolder -ErrorAction Stop | Out-Null
     }
     catch {
         Write-Error "Failed to create quarantine folder: $($_.Exception.Message)"
-        exit
+        exit 1
     }
 }
+
+$QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 
 Write-Host "Building size and hash index for reference folder..."
 
@@ -54,15 +95,19 @@ function Get-FilesFast {
         $enumOpts = [System.IO.EnumerationOptions]::new()
         $enumOpts.RecurseSubdirectories = $true
         $enumOpts.IgnoreInaccessible = $true
+        $enumOpts.AttributesToSkip = $enumOpts.AttributesToSkip -bor [System.IO.FileAttributes]::ReparsePoint
         return [System.IO.DirectoryInfo]::new($RootPath).EnumerateFiles('*', $enumOpts)
     }
-    return Get-ChildItem -LiteralPath $RootPath -File -Recurse -ErrorAction SilentlyContinue
+    return Get-ChildItem -LiteralPath $RootPath -File -Recurse -ErrorAction SilentlyContinue | Where-Object {
+        ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+    }
 }
 
 $referenceFilesBySize = @{}
 
 # ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
 foreach ($file in Get-FilesFast -RootPath $ReferenceFolder) {
+    if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
     $size = $file.Length
     if (-not $referenceFilesBySize.ContainsKey($size)) {
         # ⚡ Bolt: Using List[string] instead of @() to avoid O(N²) reallocation on +=
@@ -82,6 +127,7 @@ Write-Host "Checking source folder..."
 
 # ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
 foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
+    if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
     if ($MovedFiles.ContainsKey($file.FullName)) { continue }
     try {
         $size = $file.Length
@@ -91,6 +137,7 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
             $partialMatches = [System.Collections.Generic.List[string]]::new()
 
             foreach ($refFile in $referenceFilesBySize[$size]) {
+                if ($file.FullName.Equals($refFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
                 if (-not $referencePartialHashes.ContainsKey($refFile)) {
                     $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile
                 }
@@ -133,9 +180,11 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
                     $Counter++
                 }
 
-                Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
-                $MovedFiles[$file.FullName] = $true
-                Write-Host "Moved duplicate to quarantine: $($file.FullName)"
+                if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $Destination")) {
+                    Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
+                    $MovedFiles[$file.FullName] = $true
+                    Write-Host "Moved duplicate to quarantine: $($file.FullName)"
+                }
             }
         }
     }
@@ -144,9 +193,9 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
     }
 }
 
-$ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+$ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
 try {
-    $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -ErrorAction Stop
+    $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
 }
 catch {
     Write-Warning "Failed to export report: $($_.Exception.Message)"
