@@ -126,9 +126,30 @@ function Get-FilesFast {
         $enumOpts.AttributesToSkip = $enumOpts.AttributesToSkip -bor [System.IO.FileAttributes]::ReparsePoint
         return [System.IO.DirectoryInfo]::new($RootPath).EnumerateFiles('*', $enumOpts)
     }
-    return Get-ChildItem -LiteralPath $RootPath -File -Recurse -ErrorAction SilentlyContinue | Where-Object {
-        ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0
+
+    # ⚡ Bolt: Stack-based .NET traversal for PS 5.1 avoids Get-ChildItem pipeline overhead and skips reparse-point directories before descending
+    $results = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $stack = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $rootInfo = [System.IO.DirectoryInfo]::new($RootPath)
+    if (($rootInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+        $stack.Push($rootInfo)
     }
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        try {
+            foreach ($entry in $dir.EnumerateFileSystemInfos()) {
+                if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                if ($entry -is [System.IO.DirectoryInfo]) {
+                    $stack.Push($entry)
+                } elseif ($entry -is [System.IO.FileInfo]) {
+                    $results.Add($entry)
+                }
+            }
+        } catch {
+            # Ignore inaccessible directories
+        }
+    }
+    return $results
 }
 
 $referenceFilesBySize = @{}
