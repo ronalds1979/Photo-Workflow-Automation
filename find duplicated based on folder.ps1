@@ -246,10 +246,24 @@ $MovedFiles = @{}
 # ⚡ Bolt: Using List instead of @() for efficient O(1) appends
 $duplicates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-Write-Host "Checking source folder..."
+$sourceFiles = @(Get-FilesFast -RootPath $SourceFolder)
+$TotalSourceFiles = $sourceFiles.Count
+$SourceIndex = 0
+$LastPercent = -1
+[long]$ReclaimedBytes = 0
+
+Write-Host "Checking $TotalSourceFiles file(s) in source folder..."
 
 # ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
-foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
+foreach ($file in $sourceFiles) {
+    $SourceIndex++
+    if ($TotalSourceFiles -gt 0) {
+        $Percent = [int](($SourceIndex / $TotalSourceFiles) * 100)
+        if ($Percent -ne $LastPercent) {
+            $LastPercent = $Percent
+            Write-Progress -Activity "Checking source folder for duplicates" -Status "$SourceIndex of $TotalSourceFiles ($($file.Name))" -PercentComplete $Percent
+        }
+    }
     if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
     if ($MovedFiles.ContainsKey($file.FullName)) { continue }
     try {
@@ -327,9 +341,11 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
                 if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $Destination")) {
                     Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
                     $MovedFiles[$file.FullName] = $true
+                    $ReclaimedBytes += $size
                     Write-Host "Moved duplicate to quarantine: $($file.FullName)"
                 } elseif ($WhatIfPreference) {
                     $MovedFiles[$file.FullName] = $true
+                    $ReclaimedBytes += $size
                 }
             }
         }
@@ -339,6 +355,7 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
     }
 }
 
+Write-Progress -Activity "Checking source folder for duplicates" -Completed
 $PartialSha256.Dispose()
 
 $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
@@ -351,5 +368,8 @@ catch {
 
 Write-Host ""
 Write-Host "Completed."
-Write-Host "Duplicates moved to: $QuarantineFolder"
-Write-Host "Report saved to: $ReportFile"
+Write-Host "Files checked     : $TotalSourceFiles"
+Write-Host "Duplicates moved  : $($duplicates.Count)"
+Write-Host "Space reclaimed   : $([Math]::Round($ReclaimedBytes / 1MB, 2)) MB"
+Write-Host "Quarantine folder : $QuarantineFolder"
+Write-Host "Report saved to   : $ReportFile"

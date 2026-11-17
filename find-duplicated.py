@@ -16,6 +16,13 @@ MAX_FILE_BYTES = 150 * 1024 * 1024
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
 
+def format_bytes(num_bytes):
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024.0
+
 def get_jpg_hash(jpg_path):
     if os.path.getsize(jpg_path) > MAX_FILE_BYTES:
         raise ValueError(f"JPG file size exceeds {MAX_FILE_BYTES} bytes")
@@ -135,11 +142,12 @@ def process_jpg_file(
     # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
     # This turns O(N) expensive image loads/hashes into O(1) for the JPG
     try:
+        jpg_size = os.path.getsize(jpg_path)
         jpg_hash = get_jpg_hash(jpg_path)
     except Exception as error:
         if verbose:
             print(f"Could not load/hash JPG {jpg_path}: {error}")
-        return None, False
+        return None, False, 0
 
     for nef_path in nef_paths:
         try:
@@ -163,7 +171,7 @@ def process_jpg_file(
     if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
         if dry_run:
             verb = "delete" if delete else "quarantine"
-            return f"[DRY-RUN] Would {verb}: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True
+            return f"[DRY-RUN] Would {verb}: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True, jpg_size
         try:
             if delete:
                 os.remove(jpg_path)
@@ -175,19 +183,19 @@ def process_jpg_file(
             # Always return the error to be logged (even if not verbose,
             # errors during deletion/quarantine are important)
             verb = "delete" if delete else "quarantine"
-            return f"Error: Failed to {verb} {jpg_path}: {e}", False
+            return f"Error: Failed to {verb} {jpg_path}: {e}", False, 0
 
         if verbose:
-            return f"{action_msg} (perceptual hash similarity: {best_similarity:.2%})", True
-        return None, True
+            return f"{action_msg} (perceptual hash similarity: {best_similarity:.2%})", True, jpg_size
+        return None, True, jpg_size
     elif verbose:
         if best_similarity is None:
             reason = "could not calculate a perceptual hash"
         else:
             reason = f"best perceptual hash similarity: {best_similarity:.2%}"
-        return f"Kept: {jpg_path} ({reason})", False
+        return f"Kept: {jpg_path} ({reason})", False, 0
 
-    return None, False
+    return None, False, 0
 
 def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None):
     # ⚡ Bolt: Cache NEF hashes across JPGs sharing the same prefix in a directory
@@ -224,7 +232,7 @@ def process_prefix_batch(batch, verbose, dry_run=False, delete=False, root_dir=N
         )
     return batch_results
 
-def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=False, quarantine_dir=None):
+def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=False, quarantine_dir=None, return_stats=False):
     root_dir = os.path.abspath(directory)
     reparse_root = _validate_no_reparse_lineage(root_dir)
     if reparse_root:
@@ -245,6 +253,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
     quarantine_dir_norm = os.path.normcase(quarantine_dir_abs) if quarantine_dir_abs else None
 
     deleted_count = 0
+    reclaimed_bytes = 0
     work_items = []
 
     stack = [root_dir]
@@ -297,12 +306,16 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
             work_items.append((group_jpgs, nef_paths_by_prefix[prefix]))
 
     if not work_items:
-        return 0
+        return (0, 0) if return_stats else 0
+
+    total_candidate_jpgs = sum(len(group_jpgs) for group_jpgs, _ in work_items)
+    print(f"Found {total_candidate_jpgs} candidate JPG(s) across {len(work_items)} prefix group(s).")
 
     # ⚡ Bolt: Avoid ProcessPoolExecutor spawn + heavy scientific import overhead (~0.45s/worker on Windows) for small workloads
     if len(work_items) < 16:
-        for group_jpgs, nef_paths in work_items:
-            for msg, deleted in process_prefix_group(
+        total_groups = len(work_items)
+        for idx, (group_jpgs, nef_paths) in enumerate(work_items, start=1):
+            for msg, deleted, item_bytes in process_prefix_group(
                 group_jpgs,
                 nef_paths,
                 verbose,
@@ -315,13 +328,17 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                     print(msg)
                 if deleted:
                     deleted_count += 1
-        return deleted_count
+                    reclaimed_bytes += item_bytes
+            if total_groups >= 4 and (idx % 4 == 0 or idx == total_groups):
+                print(f"Progress: {idx}/{total_groups} group(s) checked...")
+        return (deleted_count, reclaimed_bytes) if return_stats else deleted_count
 
     # ⚡ Bolt: Batch prefix groups per future to cut IPC pickling and Future allocation overhead
     batch_size = 8
     batches = [work_items[i:i + batch_size] for i in range(0, len(work_items), batch_size)]
     total_batches = len(batches)
     max_workers = min(os.cpu_count() or 1, total_batches)
+    progress_step = 1 if total_batches < 10 else 10
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [
@@ -338,17 +355,18 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
         ]
         for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             try:
-                for msg, deleted in future.result():
+                for msg, deleted, item_bytes in future.result():
                     if msg:
                         print(msg)
                     if deleted:
                         deleted_count += 1
+                        reclaimed_bytes += item_bytes
             except Exception as e:
                 print(f"Error processing a file pair: {e}")
-            if total_batches >= 10 and (completed % 10 == 0 or completed == total_batches):
+            if completed % progress_step == 0 or completed == total_batches:
                 print(f"Progress: {completed}/{total_batches} batch(es) checked...")
 
-    return deleted_count
+    return (deleted_count, reclaimed_bytes) if return_stats else deleted_count
 
 def main():
     parser = argparse.ArgumentParser(
@@ -406,19 +424,20 @@ def main():
             parser.error(f"quarantine path exists and is not a folder: {effective_quarantine}")
 
     try:
-        processed_count = delete_jpgs_with_nef_pairs(
+        processed_count, reclaimed_bytes = delete_jpgs_with_nef_pairs(
             args.folder,
             verbose=args.verbose,
             dry_run=args.dry_run,
             delete=args.delete,
             quarantine_dir=args.quarantine,
+            return_stats=True,
         )
         if args.dry_run:
             action_word = "Would delete" if args.delete else "Would quarantine"
         else:
             action_word = "Deleted" if args.delete else "Quarantined"
         print(
-            f"{action_word} {processed_count} .jpg file(s) with at least "
+            f"{action_word} {processed_count} .jpg file(s) ({format_bytes(reclaimed_bytes)}) with at least "
             f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity."
         )
     except KeyboardInterrupt:

@@ -268,6 +268,8 @@ $MovedFiles = @{}
 $VideoIndex = 0
 $TotalVideosToCheck = $VideosToCheck.Count
 $LastPercent = -1
+[long]$ReclaimedBytes = 0
+[int]$DuplicatesMoved = 0
 
 foreach ($Video in $VideosToCheck) {
     $VideoIndex++
@@ -354,8 +356,12 @@ foreach ($Video in $VideosToCheck) {
 
                     # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
                     $MovedFiles[$Video.FullName] = $true
+                    $DuplicatesMoved++
+                    $ReclaimedBytes += $Video.Length
                 } elseif ($WhatIfPreference) {
                     $MovedFiles[$Video.FullName] = $true
+                    $DuplicatesMoved++
+                    $ReclaimedBytes += $Video.Length
                 }
 
                 break
@@ -369,9 +375,11 @@ foreach ($Video in $VideosToCheck) {
     }
 }
 
+Write-Progress -Activity "Checking for duplicate videos" -Completed
 $PartialSha256.Dispose()
 
 Write-Host ""
 Write-Host "Finished."
+Write-Host "Duplicates moved  : $DuplicatesMoved ($([Math]::Round($ReclaimedBytes / 1MB, 2)) MB)"
 Write-Host "Duplicates moved to: $QuarantineFolder"
 Write-Host ""
