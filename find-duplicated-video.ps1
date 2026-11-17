@@ -1,8 +1,20 @@
-﻿# ====================================================================
-# FIND AND REMOVE DUPLICATE VIDEOS
-# Keeps the copy outside the target folder
-# Moves duplicates to a quarantine folder for safety
-# ====================================================================
+﻿<#
+.SYNOPSIS
+    Find and quarantine duplicate video files inside a target folder.
+.DESCRIPTION
+    Scans DriveRoot for video files matching the name and length of videos inside
+    FolderToCheck, verifies duplicates using partial SHA-256 and exact streaming byte
+    comparison, and moves duplicates to QuarantineFolder. Supports -WhatIf previews.
+.PARAMETER FolderToCheck
+    Folder containing candidate duplicate videos (must be inside DriveRoot).
+.PARAMETER DriveRoot
+    Root directory to search for reference copies.
+.PARAMETER QuarantineFolder
+    Destination folder where duplicate videos are moved.
+.EXAMPLE
+    .\find-duplicated-video.ps1 -FolderToCheck "D:\Inbox" -DriveRoot "D:\" -WhatIf
+    Previews which duplicate videos would be moved to quarantine without modifying files.
+#>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -379,7 +391,11 @@ foreach ($Video in $VideosToCheck) {
                 }
 
                 Write-Host ""
-                Write-Host "DUPLICATE FOUND" -ForegroundColor Yellow
+                if ([string]::IsNullOrEmpty($env:NO_COLOR)) {
+                    Write-Host "DUPLICATE FOUND" -ForegroundColor Yellow
+                } else {
+                    Write-Host "DUPLICATE FOUND"
+                }
                 Write-Host "MOVE : $($Video.FullName)"
                 Write-Host "KEEP : $($Candidate.FullName)"
                 Write-Host ""
@@ -426,7 +442,13 @@ Write-Progress -Activity "Checking for duplicate videos" -Completed
 $PartialSha256.Dispose()
 
 Write-Host ""
-Write-Host "Finished."
-Write-Host "Duplicates moved  : $DuplicatesMoved ($([Math]::Round($ReclaimedBytes / 1MB, 2)) MB)"
-Write-Host "Duplicates moved to: $QuarantineFolder"
+if ($WhatIfPreference) {
+    Write-Host "Finished (WhatIf preview - no files were moved)."
+    Write-Host "Duplicates that would be moved: $DuplicatesMoved ($([Math]::Round($ReclaimedBytes / 1MB, 2)) MB)"
+    Write-Host "Target quarantine folder      : $QuarantineFolder"
+} else {
+    Write-Host "Finished."
+    Write-Host "Duplicates moved  : $DuplicatesMoved ($([Math]::Round($ReclaimedBytes / 1MB, 2)) MB)"
+    Write-Host "Duplicates moved to: $QuarantineFolder"
+}
 Write-Host ""

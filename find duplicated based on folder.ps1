@@ -1,4 +1,22 @@
-﻿[CmdletBinding(SupportsShouldProcess = $true)]
+﻿<#
+.SYNOPSIS
+    Find and quarantine files in a source folder that already exist in a reference folder.
+.DESCRIPTION
+    Indexes ReferenceFolder by file size, compares candidate files in SourceFolder
+    using partial SHA-256 and exact byte/full-hash verification, moves confirmed
+    duplicates to QuarantineFolder, and exports a CSV report on real runs.
+.PARAMETER SourceFolder
+    Folder to scan for duplicate files to quarantine.
+.PARAMETER ReferenceFolder
+    Authoritative reference folder containing files to keep.
+.PARAMETER QuarantineFolder
+    Destination folder where duplicate source files are moved.
+.EXAMPLE
+    .\find` duplicated` based` on` folder.ps1 -SourceFolder "D:\Inbox" -ReferenceFolder "D:\Pictures" -WhatIf
+    Previews which duplicate files would be moved without altering disk state or writing a Desktop CSV report.
+#>
+
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$SourceFolder = "D:\Other files and trash videos",
     [string]$ReferenceFolder = "D:\Original\Pictures",
@@ -422,18 +440,30 @@ foreach ($file in $sourceFiles) {
 Write-Progress -Activity "Checking source folder for duplicates" -Completed
 $PartialSha256.Dispose()
 
-$ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
-try {
-    $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
-}
-catch {
-    Write-Warning "Failed to export report: $($_.Exception.Message)"
-}
-
 Write-Host ""
-Write-Host "Completed."
-Write-Host "Files checked     : $TotalSourceFiles"
-Write-Host "Duplicates moved  : $($duplicates.Count)"
-Write-Host "Space reclaimed   : $([Math]::Round($ReclaimedBytes / 1MB, 2)) MB"
-Write-Host "Quarantine folder : $QuarantineFolder"
-Write-Host "Report saved to   : $ReportFile"
+if ($WhatIfPreference) {
+    Write-Host "Completed (WhatIf preview - no files were moved)."
+    Write-Host "Files checked                  : $TotalSourceFiles"
+    Write-Host "Duplicates that would be moved : $($duplicates.Count)"
+    Write-Host "Space that would be reclaimed  : $([Math]::Round($ReclaimedBytes / 1MB, 2)) MB"
+    Write-Host "Target quarantine folder       : $QuarantineFolder"
+} else {
+    $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
+    $reportSaved = $false
+    try {
+        $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
+        $reportSaved = $true
+    }
+    catch {
+        Write-Warning "Failed to export report: $($_.Exception.Message)"
+    }
+
+    Write-Host "Completed."
+    Write-Host "Files checked     : $TotalSourceFiles"
+    Write-Host "Duplicates moved  : $($duplicates.Count)"
+    Write-Host "Space reclaimed   : $([Math]::Round($ReclaimedBytes / 1MB, 2)) MB"
+    Write-Host "Quarantine folder : $QuarantineFolder"
+    if ($reportSaved) {
+        Write-Host "Report saved to   : $ReportFile"
+    }
+}

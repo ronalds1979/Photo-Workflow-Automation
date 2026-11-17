@@ -3,6 +3,7 @@ import errno
 import io
 import os
 import shutil
+import time
 import concurrent.futures
 
 import imagehash
@@ -273,6 +274,9 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
 
     deleted_count = 0
     reclaimed_bytes = 0
+    scanned_dirs = 0
+    total_nefs = 0
+    total_jpgs = 0
     work_items = []
 
     stack = [root_dir]
@@ -283,6 +287,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 entries = list(it)
         except OSError:
             continue
+        scanned_dirs += 1
 
         nef_paths_by_prefix = {}
         jpg_entries = []
@@ -306,9 +311,11 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 ext_lower = extension.casefold()
 
                 if ext_lower == ".nef":
+                    total_nefs += 1
                     prefix = stem[:-9].casefold()
                     nef_paths_by_prefix.setdefault(prefix, []).append(entry.path)
                 elif ext_lower == ".jpg":
+                    total_jpgs += 1
                     jpg_entries.append((entry.path, stem))
 
         # ⚡ Bolt: Skip JPG prefix computation entirely in folders with no NEF files
@@ -325,10 +332,11 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
             work_items.append((group_jpgs, nef_paths_by_prefix[prefix]))
 
     if not work_items:
+        print(f"Scanned {scanned_dirs} folder(s) ({total_nefs} NEF(s), {total_jpgs} JPG(s)): no matching NEF/JPG prefix pairs found.")
         return (0, 0) if return_stats else 0
 
     total_candidate_jpgs = sum(len(group_jpgs) for group_jpgs, _ in work_items)
-    print(f"Found {total_candidate_jpgs} candidate JPG(s) across {len(work_items)} prefix group(s).")
+    print(f"Scanned {scanned_dirs} folder(s): found {total_candidate_jpgs} candidate JPG(s) across {len(work_items)} NEF prefix group(s).")
 
     # ⚡ Bolt: Avoid ProcessPoolExecutor spawn + heavy scientific import overhead (~0.45s/worker on Windows) for small workloads
     if len(work_items) < 16:
@@ -450,6 +458,7 @@ def main():
             parser.error(f"quarantine path exists and is not a folder: {effective_quarantine_abs}")
 
     try:
+        start_time = time.monotonic()
         processed_count, reclaimed_bytes = delete_jpgs_with_nef_pairs(
             args.folder,
             verbose=args.verbose,
@@ -458,14 +467,17 @@ def main():
             quarantine_dir=args.quarantine,
             return_stats=True,
         )
+        elapsed = time.monotonic() - start_time
         if args.dry_run:
             action_word = "Would delete" if args.delete else "Would quarantine"
         else:
             action_word = "Deleted" if args.delete else "Quarantined"
         print(
             f"{action_word} {processed_count} .jpg file(s) ({format_bytes(reclaimed_bytes)}) with at least "
-            f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity."
+            f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity ({elapsed:.2f}s)."
         )
+        if not args.delete and processed_count > 0 and effective_quarantine:
+            print(f"Quarantine folder: {os.path.abspath(effective_quarantine)}")
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
     except Exception as e:
