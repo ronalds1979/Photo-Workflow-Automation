@@ -169,6 +169,9 @@ function Get-FastPartialHash {
         [string]$LiteralPath,
         [long]$ExpectedLength = -1
     )
+    if (([System.IO.File]::GetAttributes($LiteralPath) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $LiteralPath")
+    }
     $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $PartialSha256.Initialize()
@@ -207,6 +210,12 @@ $CompareBuf2 = New-Object byte[] $CompareBufferSize
 
 function Compare-FilesExact {
     param([string]$Path1, [string]$Path2)
+    if (([System.IO.File]::GetAttributes($Path1) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $Path1")
+    }
+    if (([System.IO.File]::GetAttributes($Path2) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $Path2")
+    }
     $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     $s2 = $null
     try {
@@ -234,7 +243,9 @@ function Compare-FilesExact {
 function Format-SafeCsvField {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    if ($Value[0] -in @('=', '+', '-', '@', "`t", "`r")) {
+    $trimmedStart = $Value.TrimStart()
+    if ($Value[0] -in @('=', '+', '-', '@', "`t", "`r", "`n") -or
+        (-not [string]::IsNullOrEmpty($trimmedStart) -and $trimmedStart[0] -in @('=', '+', '-', '@'))) {
         return "'" + $Value
     }
     return $Value
@@ -425,11 +436,6 @@ foreach ($file in $sourceFiles) {
                     continue
                 }
 
-                $duplicates.Add([PSCustomObject]@{
-                    SourceFile = (Format-SafeCsvField -Value $file.FullName)
-                    MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
-                })
-
                 $PreviewDestination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $true
                 if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $PreviewDestination")) {
                     $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $false
@@ -442,10 +448,18 @@ foreach ($file in $sourceFiles) {
                         }
                         throw
                     }
+                    $duplicates.Add([PSCustomObject]@{
+                        SourceFile = (Format-SafeCsvField -Value $file.FullName)
+                        MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
+                    })
                     $null = $MovedFiles.Add($file.FullName)
                     $ReclaimedBytes += $size
                     Write-Host "Moved duplicate to quarantine: $($file.FullName)"
                 } elseif ($WhatIfPreference) {
+                    $duplicates.Add([PSCustomObject]@{
+                        SourceFile = (Format-SafeCsvField -Value $file.FullName)
+                        MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
+                    })
                     $null = $MovedFiles.Add($file.FullName)
                     $ReclaimedBytes += $size
                 }
@@ -471,14 +485,24 @@ if ($WhatIfPreference) {
     Write-Host "Space that would be reclaimed  : $FormattedSize"
     Write-Host "Target quarantine folder       : $QuarantineFolder"
 } else {
-    $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
-    $reportSaved = $false
-    try {
-        $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
-        $reportSaved = $true
+    $DesktopDir = [Environment]::GetFolderPath('Desktop')
+    $ReportDir = if (-not [string]::IsNullOrWhiteSpace($DesktopDir) -and (Test-Path -LiteralPath $DesktopDir -PathType Container)) {
+        $DesktopDir
+    } else {
+        $QuarantineFolder
     }
-    catch {
-        Write-Warning "Failed to export report: $($_.Exception.Message)"
+    $reportSaved = $false
+    if (Test-HasReparsePointInLineage -Path $ReportDir) {
+        Write-Warning "Refusing to export report into reparse-point path: $ReportDir"
+    } else {
+        $ReportFile = Join-Path $ReportDir "DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
+        try {
+            $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
+            $reportSaved = $true
+        }
+        catch {
+            Write-Warning "Failed to export report: $($_.Exception.Message)"
+        }
     }
 
     Write-Host "Completed in ${ElapsedText}s."

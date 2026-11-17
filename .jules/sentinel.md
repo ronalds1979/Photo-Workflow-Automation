@@ -52,3 +52,9 @@
 - Added atomic quarantine file reservation (`Reserve-QuarantinePath` using `FileMode::CreateNew`) and pre-move reparse-point verification across both PowerShell scripts.
 - Added worker-level time-of-use `_is_reparse_point` checks in `get_jpg_hash`, `get_nef_hash`, and `process_jpg_file`, and rejected scan-root/ancestor quarantine directories in `find-duplicated.py`.
 - Added automated regression and security tests in `test_security.py`.
+
+## 2026-11-17 - Pre-Creation Lineage, Collision & CSV Reporting Hardening
+**Vulnerabilities Remediated:**
+- Updated `_quarantine_file` in `find-duplicated.py` to check `_is_reparse_point(jpg_path)`, validate `_validate_no_reparse_lineage(target_dir)` *before* `os.makedirs()`, handle existing-directory collisions (`IsADirectoryError` / `PermissionError` on Windows) with bounded `MAX_COLLISION_ATTEMPTS`, and verify the reserved destination is not a reparse point before moving.
+- Added fast `[System.IO.File]::GetAttributes(...).ReparsePoint` checks inside `Get-FastPartialHash` and `Compare-FilesExact` across both PowerShell scripts.
+- Fixed `find duplicated based on folder.ps1` to record `$duplicates` only after `Move-Item` succeeds (or in `-WhatIf` preview), hardened `Format-SafeCsvField` against leading-whitespace / newline formula prefixes, and resolved the CSV export folder via `[Environment]::GetFolderPath('Desktop')` with reparse-lineage verification.

@@ -194,6 +194,104 @@ class TestPhotoWorkflowSecurity(unittest.TestCase):
             self.assertNotEqual(res_ancestor.returncode, 0)
             self.assertIn("ancestor", (res_ancestor.stderr + res_ancestor.stdout).lower())
 
+    def test_quarantine_file_checks_lineage_before_makedirs_and_handles_dir_collision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_dir = os.path.join(tmpdir, "root")
+            sub_dir = os.path.join(root_dir, "sub")
+            quarantine_dir = os.path.join(tmpdir, "quarantine")
+            os.makedirs(sub_dir)
+            os.makedirs(quarantine_dir)
+
+            src = os.path.join(sub_dir, "IMG_0001.jpg")
+            with open(src, "wb") as f:
+                f.write(b"jpg")
+
+            # Pre-create a directory at the exact destination path to verify collision recovery
+            os.makedirs(os.path.join(quarantine_dir, "sub", "IMG_0001.jpg"))
+            find_duplicated._VALIDATED_TARGET_DIRS.clear()
+            dest = find_duplicated._quarantine_file(src, root_dir, quarantine_dir)
+            self.assertEqual(os.path.basename(dest), "IMG_0001_1.jpg")
+            self.assertTrue(os.path.isfile(dest))
+
+            # Verify pre-makedirs reparse lineage validation blocks os.makedirs before touching disk
+            src2 = os.path.join(sub_dir, "IMG_0002.jpg")
+            with open(src2, "wb") as f:
+                f.write(b"jpg2")
+            blocked_dir = os.path.join(tmpdir, "new_q", "sub")
+            find_duplicated._VALIDATED_TARGET_DIRS.clear()
+            with patch.object(find_duplicated, "_validate_no_reparse_lineage", return_value=tmpdir), \
+                 patch.object(os, "makedirs") as mock_makedirs:
+                with self.assertRaises(OSError):
+                    find_duplicated._quarantine_file(src2, root_dir, os.path.join(tmpdir, "new_q"))
+                mock_makedirs.assert_not_called()
+            self.assertFalse(os.path.exists(blocked_dir))
+
+    def test_powershell_folder_script_csv_sanitization_and_real_move(self):
+        if sys.platform != "win32":
+            self.skipTest("PowerShell tests require Windows")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = os.path.join(tmpdir, "source")
+            ref_dir = os.path.join(tmpdir, "ref")
+            quarantine_dir = os.path.join(tmpdir, "quarantine")
+            os.makedirs(source_dir)
+            os.makedirs(ref_dir)
+
+            # Name beginning with '=' with leading space to verify CSV formula injection neutralization
+            dup_name = " =cmd.txt"
+            src_file = os.path.join(source_dir, dup_name)
+            ref_file = os.path.join(ref_dir, "original.txt")
+            with open(src_file, "wb") as f:
+                f.write(b"duplicate-content-12345")
+            with open(ref_file, "wb") as f:
+                f.write(b"duplicate-content-12345")
+
+            # Verify WhatIf preview identifies duplicate cleanly without altering disk or Desktop
+            res_whatif = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    PS_FOLDER_SCRIPT,
+                    "-SourceFolder",
+                    source_dir,
+                    "-ReferenceFolder",
+                    ref_dir,
+                    "-QuarantineFolder",
+                    quarantine_dir,
+                    "-WhatIf",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertEqual(res_whatif.returncode, 0, res_whatif.stderr)
+            self.assertIn("Duplicates that would be moved : 1", res_whatif.stdout)
+            self.assertTrue(os.path.isfile(src_file))
+
+            # Verify Format-SafeCsvField handles whitespace-prefixed formulas and newlines
+            with open(PS_FOLDER_SCRIPT, encoding="utf-8") as f:
+                script_text = f.read()
+            start = script_text.index("function Format-SafeCsvField")
+            end = script_text.index("function Reserve-QuarantinePath")
+            fn_def = script_text[start:end]
+            res = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    fn_def + "\nWrite-Output (Format-SafeCsvField '  =1+1')\nWrite-Output (Format-SafeCsvField \"`n=cmd\")",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            lines = [line for line in res.stdout.splitlines() if line]
+            self.assertTrue(lines[0].startswith("'  =1+1"))
+            self.assertTrue(lines[1].startswith("'"))
+
 
 if __name__ == "__main__":
     unittest.main()

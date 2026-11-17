@@ -179,6 +179,9 @@ function Get-FastPartialHash {
         [string]$LiteralPath,
         [long]$ExpectedLength = -1
     )
+    if (([System.IO.File]::GetAttributes($LiteralPath) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $LiteralPath")
+    }
     $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $PartialSha256.Initialize()
@@ -217,6 +220,12 @@ $CompareBuf2 = New-Object byte[] $CompareBufferSize
 
 function Compare-FilesExact {
     param([string]$Path1, [string]$Path2)
+    if (([System.IO.File]::GetAttributes($Path1) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $Path1")
+    }
+    if (([System.IO.File]::GetAttributes($Path2) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $Path2")
+    }
     $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     $s2 = $null
     try {

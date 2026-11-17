@@ -91,8 +91,11 @@ def _validate_no_reparse_lineage(path):
     return None
 
 _VALIDATED_TARGET_DIRS = set()
+MAX_COLLISION_ATTEMPTS = 10_000
 
 def _quarantine_file(jpg_path, root_dir, quarantine_dir):
+    if _is_reparse_point(jpg_path):
+        raise OSError(f"Refusing to quarantine symlink or junction: {jpg_path}")
     rel_path = os.path.relpath(jpg_path, root_dir)
     if (
         rel_path == ".."
@@ -103,27 +106,46 @@ def _quarantine_file(jpg_path, root_dir, quarantine_dir):
         rel_path = os.path.basename(jpg_path)
     dest_path = os.path.join(quarantine_dir, rel_path)
     target_dir = os.path.dirname(dest_path)
-    os.makedirs(target_dir, exist_ok=True)
     # ⚡ Bolt: Memoize validated target directories to avoid repeating root-to-leaf reparse walks per file
     if target_dir not in _VALIDATED_TARGET_DIRS:
         reparse_target = _validate_no_reparse_lineage(target_dir)
         if reparse_target:
             raise OSError(f"Refusing to quarantine through symlink or junction: {reparse_target}")
+        os.makedirs(target_dir, exist_ok=True)
+        reparse_target = _validate_no_reparse_lineage(target_dir)
+        if reparse_target:
+            raise OSError(f"Refusing to quarantine through symlink or junction: {reparse_target}")
         _VALIDATED_TARGET_DIRS.add(target_dir)
+    else:
+        os.makedirs(target_dir, exist_ok=True)
 
     base, ext = os.path.splitext(dest_path)
     counter = 1
     candidate = dest_path
     while True:
+        if counter > MAX_COLLISION_ATTEMPTS:
+            raise OSError(f"Exceeded {MAX_COLLISION_ATTEMPTS} quarantine collision attempts for {dest_path}")
+        if os.path.isdir(candidate):
+            candidate = f"{base}_{counter}{ext}"
+            counter += 1
+            continue
         try:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             break
-        except FileExistsError:
+        except (FileExistsError, IsADirectoryError):
             candidate = f"{base}_{counter}{ext}"
             counter += 1
+        except PermissionError:
+            if os.path.lexists(candidate):
+                candidate = f"{base}_{counter}{ext}"
+                counter += 1
+                continue
+            raise
 
     try:
+        if _is_reparse_point(candidate):
+            raise OSError(f"Refusing to overwrite symlink or junction at destination: {candidate}")
         try:
             os.replace(jpg_path, candidate)
         except OSError as e:
@@ -134,7 +156,7 @@ def _quarantine_file(jpg_path, root_dir, quarantine_dir):
                 raise
     except Exception:
         try:
-            if os.path.lexists(candidate):
+            if os.path.lexists(candidate) and not _is_reparse_point(candidate):
                 os.remove(candidate)
         except OSError:
             pass
