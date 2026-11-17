@@ -122,6 +122,26 @@ elseif ($PSCmdlet.ShouldProcess($QuarantineFolder, "Create quarantine directory"
     }
 }
 
+function Format-ByteSize {
+    param([long]$Bytes)
+    $size = [double]$Bytes
+    foreach ($unit in @("B", "KB", "MB", "GB", "TB")) {
+        if ($size -lt 1024.0 -or $unit -eq "TB") {
+            if ($unit -eq "B") {
+                return "$([Math]::Round($size)) B"
+            }
+            return "$($size.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)) $unit"
+        }
+        $size /= 1024.0
+    }
+}
+
+$Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$ModeLabel = if ($WhatIfPreference) { "WhatIf preview (no files will be moved)" } else { "Active quarantine" }
+Write-Host "Mode             : $ModeLabel"
+Write-Host "Source folder    : $SourceFolder"
+Write-Host "Reference folder : $ReferenceFolder"
+Write-Host "Quarantine folder: $QuarantineFolder"
 Write-Host "Scanning source folder and building matching reference index..."
 
 # ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) with reusable buffer & SHA256 instance
@@ -439,13 +459,16 @@ foreach ($file in $sourceFiles) {
 
 Write-Progress -Activity "Checking source folder for duplicates" -Completed
 $PartialSha256.Dispose()
+$Stopwatch.Stop()
+$ElapsedText = $Stopwatch.Elapsed.TotalSeconds.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+$FormattedSize = Format-ByteSize -Bytes $ReclaimedBytes
 
 Write-Host ""
 if ($WhatIfPreference) {
-    Write-Host "Completed (WhatIf preview - no files were moved)."
+    Write-Host "Completed in ${ElapsedText}s (WhatIf preview - no files were moved)."
     Write-Host "Files checked                  : $TotalSourceFiles"
     Write-Host "Duplicates that would be moved : $($duplicates.Count)"
-    Write-Host "Space that would be reclaimed  : $([Math]::Round($ReclaimedBytes / 1MB, 2)) MB"
+    Write-Host "Space that would be reclaimed  : $FormattedSize"
     Write-Host "Target quarantine folder       : $QuarantineFolder"
 } else {
     $ReportFile = "$env:USERPROFILE\Desktop\DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
@@ -458,10 +481,10 @@ if ($WhatIfPreference) {
         Write-Warning "Failed to export report: $($_.Exception.Message)"
     }
 
-    Write-Host "Completed."
+    Write-Host "Completed in ${ElapsedText}s."
     Write-Host "Files checked     : $TotalSourceFiles"
     Write-Host "Duplicates moved  : $($duplicates.Count)"
-    Write-Host "Space reclaimed   : $([Math]::Round($ReclaimedBytes / 1MB, 2)) MB"
+    Write-Host "Space reclaimed   : $FormattedSize"
     Write-Host "Quarantine folder : $QuarantineFolder"
     if ($reportSaved) {
         Write-Host "Report saved to   : $ReportFile"

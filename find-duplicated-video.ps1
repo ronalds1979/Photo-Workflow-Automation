@@ -129,7 +129,28 @@ $VideoExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComp
     $VideoExtensions.Add($_) | Out-Null
 }
 
+function Format-ByteSize {
+    param([long]$Bytes)
+    $size = [double]$Bytes
+    foreach ($unit in @("B", "KB", "MB", "GB", "TB")) {
+        if ($size -lt 1024.0 -or $unit -eq "TB") {
+            if ($unit -eq "B") {
+                return "$([Math]::Round($size)) B"
+            }
+            return "$($size.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)) $unit"
+        }
+        $size /= 1024.0
+    }
+}
+
+$Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$ModeLabel = if ($WhatIfPreference) { "WhatIf preview (no files will be moved)" } else { "Active quarantine" }
+
 Write-Host ""
+Write-Host "Mode             : $ModeLabel"
+Write-Host "Folder to check  : $FolderToCheck"
+Write-Host "Drive root       : $DriveRoot"
+Write-Host "Quarantine folder: $QuarantineFolder"
 Write-Host "Scanning drive..."
 Write-Host ""
 
@@ -440,15 +461,18 @@ foreach ($Video in $VideosToCheck) {
 
 Write-Progress -Activity "Checking for duplicate videos" -Completed
 $PartialSha256.Dispose()
+$Stopwatch.Stop()
+$ElapsedText = $Stopwatch.Elapsed.TotalSeconds.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+$FormattedSize = Format-ByteSize -Bytes $ReclaimedBytes
 
 Write-Host ""
 if ($WhatIfPreference) {
-    Write-Host "Finished (WhatIf preview - no files were moved)."
-    Write-Host "Duplicates that would be moved: $DuplicatesMoved ($([Math]::Round($ReclaimedBytes / 1MB, 2)) MB)"
+    Write-Host "Finished in ${ElapsedText}s (WhatIf preview - no files were moved)."
+    Write-Host "Duplicates that would be moved: $DuplicatesMoved ($FormattedSize)"
     Write-Host "Target quarantine folder      : $QuarantineFolder"
 } else {
-    Write-Host "Finished."
-    Write-Host "Duplicates moved  : $DuplicatesMoved ($([Math]::Round($ReclaimedBytes / 1MB, 2)) MB)"
+    Write-Host "Finished in ${ElapsedText}s."
+    Write-Host "Duplicates moved  : $DuplicatesMoved ($FormattedSize)"
     Write-Host "Duplicates moved to: $QuarantineFolder"
 }
 Write-Host ""

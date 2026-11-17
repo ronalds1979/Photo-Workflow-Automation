@@ -1,0 +1,3 @@
+## 2026-11-17 - CLI & PowerShell Scan Context, Human-Readable Units & Dry-Run Guidance
+**Learning:** Long-running duplicate detection scripts feel opaque when they start scanning without confirming the resolved folders or active mode (`WhatIf` / `dry-run` vs active quarantine/delete), and reporting reclaimed space only in `MB` obscures small KB savings or multi-GB media cleanups.
+**Action:** Print an explicit startup mode and path summary before scanning, format reclaimed byte totals dynamically with `Format-ByteSize` (`B`/`KB`/`MB`/`GB`/`TB`), include elapsed execution timing in the final summary, and surface actionable guidance after dry-run previews.

@@ -458,6 +458,12 @@ def main():
             parser.error(f"quarantine path exists and is not a folder: {effective_quarantine_abs}")
 
     try:
+        if args.dry_run:
+            print("Mode: DRY-RUN (preview only — no files will be modified)")
+        elif args.delete:
+            print("Mode: PERMANENT DELETE")
+        else:
+            print(f"Mode: QUARANTINE -> {os.path.abspath(effective_quarantine)}")
         start_time = time.monotonic()
         processed_count, reclaimed_bytes = delete_jpgs_with_nef_pairs(
             args.folder,
@@ -477,7 +483,10 @@ def main():
             f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity ({elapsed:.2f}s)."
         )
         if not args.delete and processed_count > 0 and effective_quarantine:
-            print(f"Quarantine folder: {os.path.abspath(effective_quarantine)}")
+            label = "Target quarantine folder" if args.dry_run else "Quarantine folder"
+            print(f"{label}: {os.path.abspath(effective_quarantine)}")
+        if args.dry_run and processed_count > 0:
+            print("Tip: Re-run without --dry-run to apply these changes.")
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
     except Exception as e:
