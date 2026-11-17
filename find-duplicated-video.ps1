@@ -30,6 +30,34 @@ $DriveRoot = [System.IO.Path]::GetFullPath($DriveRoot)
 $FolderToCheck = [System.IO.Path]::GetFullPath($FolderToCheck)
 $QuarantineFolder = [System.IO.Path]::GetFullPath($QuarantineFolder)
 
+function Test-HasReparsePointInLineage {
+    param([string]$Path)
+    $curr = $Path
+    while (-not [string]::IsNullOrEmpty($curr)) {
+        $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            return $true
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($curr)
+        if ($parent -eq $curr) { break }
+        $curr = $parent
+    }
+    return $false
+}
+
+if (Test-HasReparsePointInLineage -Path $DriveRoot) {
+    Write-Error "DriveRoot must not be or traverse a reparse point (symlink/junction): $DriveRoot"
+    exit 1
+}
+if (Test-HasReparsePointInLineage -Path $FolderToCheck) {
+    Write-Error "FolderToCheck must not be or traverse a reparse point (symlink/junction): $FolderToCheck"
+    exit 1
+}
+if (Test-HasReparsePointInLineage -Path $QuarantineFolder) {
+    Write-Error "Quarantine folder must not be or traverse a reparse point (symlink/junction): $QuarantineFolder"
+    exit 1
+}
+
 $DriveRootTrimmed = $DriveRoot.TrimEnd('\', '/')
 $FolderToCheckTrimmed = $FolderToCheck.TrimEnd('\', '/')
 if ($FolderToCheckTrimmed.Equals($DriveRootTrimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -81,27 +109,52 @@ $PartialChunkSize = 65536
 $PartialHashBuffer = New-Object byte[] $PartialChunkSize
 $PartialSha256 = [System.Security.Cryptography.SHA256]::Create()
 
+function Read-FullChunk {
+    param(
+        [System.IO.Stream]$Stream,
+        [byte[]]$Buffer,
+        [int]$Count
+    )
+    $totalRead = 0
+    while ($totalRead -lt $Count) {
+        $bytesRead = $Stream.Read($Buffer, $totalRead, $Count - $totalRead)
+        if ($bytesRead -eq 0) { break }
+        $totalRead += $bytesRead
+    }
+    return $totalRead
+}
+
 function Get-FastPartialHash {
-    param([string]$LiteralPath)
+    param(
+        [string]$LiteralPath,
+        [long]$ExpectedLength = -1
+    )
     $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
+        $PartialSha256.Initialize()
         $len = $stream.Length
-        $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+        if ($ExpectedLength -ge 0 -and $len -ne $ExpectedLength) {
+            throw [System.IO.IOException]::new("File length changed during scan: $LiteralPath")
+        }
+        $read = Read-FullChunk -Stream $stream -Buffer $PartialHashBuffer -Count $PartialChunkSize
         if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
 
         if ($len -gt ($PartialChunkSize * 2)) {
             $stream.Position = [long](($len - $PartialChunkSize) / 2)
-            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            $read = Read-FullChunk -Stream $stream -Buffer $PartialHashBuffer -Count $PartialChunkSize
             if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
         if ($len -gt $PartialChunkSize) {
             $stream.Position = [Math]::Max(0L, $len - $PartialChunkSize)
-            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            $read = Read-FullChunk -Stream $stream -Buffer $PartialHashBuffer -Count $PartialChunkSize
             if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
 
         $null = $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
         return [System.BitConverter]::ToString($PartialSha256.Hash).Replace("-", "")
+    } catch {
+        $PartialSha256.Initialize()
+        throw
     } finally {
         $stream.Dispose()
     }
@@ -120,8 +173,8 @@ function Compare-FilesExact {
         $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         if ($s1.Length -ne $s2.Length) { return $false }
         while ($true) {
-            $r1 = $s1.Read($CompareBuf1, 0, $CompareBufferSize)
-            $r2 = $s2.Read($CompareBuf2, 0, $CompareBufferSize)
+            $r1 = Read-FullChunk -Stream $s1 -Buffer $CompareBuf1 -Count $CompareBufferSize
+            $r2 = Read-FullChunk -Stream $s2 -Buffer $CompareBuf2 -Count $CompareBufferSize
             if ($r1 -ne $r2) { return $false }
             if ($r1 -eq 0) { return $true }
             if ($r1 -eq $CompareBufferSize) {
@@ -237,17 +290,30 @@ foreach ($Video in $VideosToCheck) {
 
     Write-Host "Checking: $($Video.Name)"
 
-    foreach ($Candidate in $AllCandidatesForName) {
+    $externalCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $intraCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($c in $AllCandidatesForName) {
+        if ($c.FullName.StartsWith($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $intraCandidates.Add($c)
+        } else {
+            $externalCandidates.Add($c)
+        }
+    }
+    $OrderedCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new($AllCandidatesForName.Count)
+    $OrderedCandidates.AddRange($externalCandidates)
+    $OrderedCandidates.AddRange($intraCandidates)
+
+    foreach ($Candidate in $OrderedCandidates) {
 
         if ($Candidate.FullName -eq $Video.FullName) { continue }
         if ($MovedFiles.ContainsKey($Candidate.FullName)) { continue }
 
         try {
             if (-not $PartialHashes.ContainsKey($Video.FullName)) {
-                $PartialHashes[$Video.FullName] = Get-FastPartialHash -LiteralPath $Video.FullName
+                $PartialHashes[$Video.FullName] = Get-FastPartialHash -LiteralPath $Video.FullName -ExpectedLength $Video.Length
             }
             if (-not $PartialHashes.ContainsKey($Candidate.FullName)) {
-                $PartialHashes[$Candidate.FullName] = Get-FastPartialHash -LiteralPath $Candidate.FullName
+                $PartialHashes[$Candidate.FullName] = Get-FastPartialHash -LiteralPath $Candidate.FullName -ExpectedLength $Video.Length
             }
             if ($PartialHashes[$Video.FullName] -ne $PartialHashes[$Candidate.FullName]) {
                 continue
@@ -268,7 +334,7 @@ foreach ($Video in $VideosToCheck) {
 
                 # Prevent filename collisions
                 $Counter = 1
-                if ([System.IO.File]::Exists($Destination)) {
+                if ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination)) {
                     $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($Video.Name)
                     $Extension = [System.IO.Path]::GetExtension($Video.Name)
                     $Timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
@@ -277,7 +343,7 @@ foreach ($Video in $VideosToCheck) {
                             $QuarantineFolder `
                             ("{0}_{1}_{2}{3}" -f $BaseName, $Timestamp, $Counter, $Extension)
                         $Counter++
-                    } while ([System.IO.File]::Exists($Destination))
+                    } while ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination))
                 }
 
                 if ($PSCmdlet.ShouldProcess($Video.FullName, "Move duplicate video to $Destination")) {
@@ -287,6 +353,8 @@ foreach ($Video in $VideosToCheck) {
                         -ErrorAction Stop
 
                     # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
+                    $MovedFiles[$Video.FullName] = $true
+                } elseif ($WhatIfPreference) {
                     $MovedFiles[$Video.FullName] = $true
                 }
 

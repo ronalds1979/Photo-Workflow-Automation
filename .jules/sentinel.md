@@ -36,3 +36,12 @@
 **Vulnerability:** Found missing error handling in `find-duplicated.py` for asynchronous worker results (`future.result()`) and top-level `main()` execution. If an unexpected error occurred inside a worker process (e.g. failing to open a file with a non-standard error, corrupted images out of PIL's expectation, or memory issues), the unhandled exception propagated out, crashing the main thread and leaking the full stack trace to the terminal.
 **Learning:** Asynchronous workers (Futures) abstract away execution but still bubble up exceptions when their `.result()` is consumed. Unhandled exceptions here, or at the top level of a script, will expose internal state and structural details via stack traces.
 **Prevention:** Always wrap `future.result()` in a `try-except` block when consuming tasks from a `ProcessPoolExecutor` or `ThreadPoolExecutor`. Furthermore, ensure the top-level execution block (e.g., `main()`) catches `Exception` and `KeyboardInterrupt` to fail securely and handle termination signals without leaking stack traces.
+
+
+## 2026-11-17 - Comprehensive Security Hardening (Sentinel Audit Remediation)
+**Vulnerabilities Remediated:**
+- Fixed reparse-point lineage & dangling-symlink bypasses in `find-duplicated.py`, `find duplicated based on folder.ps1`, and `find-duplicated-video.ps1`.
+- Fixed case-sensitive quarantine exclusion on Windows and atomic exclusive file reservation (`O_CREAT | O_EXCL`) in `_quarantine_file()` to prevent TOCTOU overwrites.
+- Added `MAX_FILE_BYTES` bounds before decoding `.jpg`/`.nef` files in `find-duplicated.py`.
+- Added directory overlap checks, `$MovedFiles` filtering in reference candidate loops, `$PartialSha256.Initialize()` reset, full-chunk stream read helper, `-WhatIf` state tracking, directory-aware collision checks, external-candidate prioritization, and CSV formula sanitization across the PowerShell scripts.
+- Added `.gitignore` and `requirements.txt`.

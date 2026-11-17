@@ -24,6 +24,48 @@ $SourceFolder = [System.IO.Path]::GetFullPath($SourceFolder)
 $ReferenceFolder = [System.IO.Path]::GetFullPath($ReferenceFolder)
 $QuarantineFolder = [System.IO.Path]::GetFullPath($QuarantineFolder)
 
+function Test-HasReparsePointInLineage {
+    param([string]$Path)
+    $curr = $Path
+    while (-not [string]::IsNullOrEmpty($curr)) {
+        $item = Get-Item -LiteralPath $curr -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            return $true
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($curr)
+        if ($parent -eq $curr) { break }
+        $curr = $parent
+    }
+    return $false
+}
+
+if (Test-HasReparsePointInLineage -Path $SourceFolder) {
+    Write-Error "Source folder must not be or traverse a reparse point (symlink/junction): $SourceFolder"
+    exit 1
+}
+if (Test-HasReparsePointInLineage -Path $ReferenceFolder) {
+    Write-Error "Reference folder must not be or traverse a reparse point (symlink/junction): $ReferenceFolder"
+    exit 1
+}
+if (Test-HasReparsePointInLineage -Path $QuarantineFolder) {
+    Write-Error "Quarantine folder must not be or traverse a reparse point (symlink/junction): $QuarantineFolder"
+    exit 1
+}
+
+$SourceNormalized = $SourceFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$ReferenceNormalized = $ReferenceFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+
+if ($SourceNormalized.Equals($ReferenceNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "SourceFolder and ReferenceFolder cannot be the same directory ($SourceFolder)."
+    exit 1
+}
+if ($QuarantineNormalized.Equals($SourceNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $QuarantineNormalized.Equals($ReferenceNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "QuarantineFolder cannot be the same as SourceFolder or ReferenceFolder ($QuarantineFolder)."
+    exit 1
+}
+
 if (Test-Path -LiteralPath $QuarantineFolder) {
     try {
         $quarantineItem = Get-Item -LiteralPath $QuarantineFolder -Force -ErrorAction Stop
@@ -51,8 +93,6 @@ elseif ($PSCmdlet.ShouldProcess($QuarantineFolder, "Create quarantine directory"
     }
 }
 
-$QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-
 Write-Host "Building size and hash index for reference folder..."
 
 # ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) with reusable buffer & SHA256 instance
@@ -60,27 +100,52 @@ $PartialChunkSize = 65536
 $PartialHashBuffer = New-Object byte[] $PartialChunkSize
 $PartialSha256 = [System.Security.Cryptography.SHA256]::Create()
 
+function Read-FullChunk {
+    param(
+        [System.IO.Stream]$Stream,
+        [byte[]]$Buffer,
+        [int]$Count
+    )
+    $totalRead = 0
+    while ($totalRead -lt $Count) {
+        $bytesRead = $Stream.Read($Buffer, $totalRead, $Count - $totalRead)
+        if ($bytesRead -eq 0) { break }
+        $totalRead += $bytesRead
+    }
+    return $totalRead
+}
+
 function Get-FastPartialHash {
-    param([string]$LiteralPath)
+    param(
+        [string]$LiteralPath,
+        [long]$ExpectedLength = -1
+    )
     $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
+        $PartialSha256.Initialize()
         $len = $stream.Length
-        $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+        if ($ExpectedLength -ge 0 -and $len -ne $ExpectedLength) {
+            throw [System.IO.IOException]::new("File length changed during scan: $LiteralPath")
+        }
+        $read = Read-FullChunk -Stream $stream -Buffer $PartialHashBuffer -Count $PartialChunkSize
         if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
 
         if ($len -gt ($PartialChunkSize * 2)) {
             $stream.Position = [long](($len - $PartialChunkSize) / 2)
-            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            $read = Read-FullChunk -Stream $stream -Buffer $PartialHashBuffer -Count $PartialChunkSize
             if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
         if ($len -gt $PartialChunkSize) {
             $stream.Position = [Math]::Max(0L, $len - $PartialChunkSize)
-            $read = $stream.Read($PartialHashBuffer, 0, $PartialChunkSize)
+            $read = Read-FullChunk -Stream $stream -Buffer $PartialHashBuffer -Count $PartialChunkSize
             if ($read -gt 0) { $null = $PartialSha256.TransformBlock($PartialHashBuffer, 0, $read, $null, 0) }
         }
 
         $null = $PartialSha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
         return [System.BitConverter]::ToString($PartialSha256.Hash).Replace("-", "")
+    } catch {
+        $PartialSha256.Initialize()
+        throw
     } finally {
         $stream.Dispose()
     }
@@ -99,8 +164,8 @@ function Compare-FilesExact {
         $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         if ($s1.Length -ne $s2.Length) { return $false }
         while ($true) {
-            $r1 = $s1.Read($CompareBuf1, 0, $CompareBufferSize)
-            $r2 = $s2.Read($CompareBuf2, 0, $CompareBufferSize)
+            $r1 = Read-FullChunk -Stream $s1 -Buffer $CompareBuf1 -Count $CompareBufferSize
+            $r2 = Read-FullChunk -Stream $s2 -Buffer $CompareBuf2 -Count $CompareBufferSize
             if ($r1 -ne $r2) { return $false }
             if ($r1 -eq 0) { return $true }
             if ($r1 -eq $CompareBufferSize) {
@@ -115,6 +180,15 @@ function Compare-FilesExact {
         if ($s2) { $s2.Dispose() }
         $s1.Dispose()
     }
+}
+
+function Format-SafeCsvField {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value[0] -in @('=', '+', '-', '@', "`t", "`r")) {
+        return "'" + $Value
+    }
+    return $Value
 }
 
 function Get-FilesFast {
@@ -183,17 +257,18 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
 
         if ($referenceFilesBySize.ContainsKey($size)) {
             $candidates = $referenceFilesBySize[$size]
-            if ($candidates.Count -eq 1 -and $file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($candidates.Count -eq 1 -and ($file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase) -or $MovedFiles.ContainsKey($candidates[0]))) {
                 continue
             }
 
-            $srcPartial = Get-FastPartialHash -LiteralPath $file.FullName
+            $srcPartial = Get-FastPartialHash -LiteralPath $file.FullName -ExpectedLength $size
             $partialMatches = [System.Collections.Generic.List[string]]::new()
 
             foreach ($refFile in $candidates) {
                 if ($file.FullName.Equals($refFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                if ($MovedFiles.ContainsKey($refFile)) { continue }
                 if (-not $referencePartialHashes.ContainsKey($refFile)) {
-                    $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile
+                    $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile -ExpectedLength $size
                 }
                 if ($srcPartial -eq $referencePartialHashes[$refFile]) {
                     $partialMatches.Add($refFile)
@@ -222,6 +297,7 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
             } else {
                 $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
                 foreach ($refFile in $partialMatches) {
+                    if ($MovedFiles.ContainsKey($refFile)) { continue }
                     if (-not $referenceHashes.ContainsKey($refFile)) {
                         $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
                     }
@@ -235,13 +311,13 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
 
             if ($matchFound) {
                 $duplicates.Add([PSCustomObject]@{
-                    SourceFile = $file.FullName
-                    MatchingFiles = ($matchingFiles -join "; ")
+                    SourceFile = (Format-SafeCsvField -Value $file.FullName)
+                    MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
                 })
 
                 $Destination = Join-Path $QuarantineFolder $file.Name
                 $Counter = 1
-                while (Test-Path -LiteralPath $Destination) {
+                while (Test-Path -LiteralPath $Destination -Force) {
                     $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
                     $Extension = [System.IO.Path]::GetExtension($file.Name)
                     $Destination = Join-Path $QuarantineFolder ("{0}_{1}_{2}{3}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Counter, $Extension)
@@ -252,6 +328,8 @@ foreach ($file in Get-FilesFast -RootPath $SourceFolder) {
                     Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
                     $MovedFiles[$file.FullName] = $true
                     Write-Host "Moved duplicate to quarantine: $($file.FullName)"
+                } elseif ($WhatIfPreference) {
+                    $MovedFiles[$file.FullName] = $true
                 }
             }
         }
