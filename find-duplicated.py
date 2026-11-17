@@ -23,8 +23,10 @@ def format_bytes(num_bytes):
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
         size /= 1024.0
 
-def get_jpg_hash(jpg_path):
-    if os.path.getsize(jpg_path) > MAX_FILE_BYTES:
+def get_jpg_hash(jpg_path, file_size=None):
+    if file_size is None:
+        file_size = os.path.getsize(jpg_path)
+    if file_size > MAX_FILE_BYTES:
         raise ValueError(f"JPG file size exceeds {MAX_FILE_BYTES} bytes")
     with Image.open(jpg_path) as jpg_file:
         # ⚡ Bolt: Use libjpeg DCT downscaling + grayscale draft mode before EXIF transpose (phash resizes to 128x128)
@@ -32,8 +34,10 @@ def get_jpg_hash(jpg_path):
         jpg_image = ImageOps.exif_transpose(jpg_file)
     return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
-def get_nef_hash(nef_path):
-    if os.path.getsize(nef_path) > MAX_FILE_BYTES:
+def get_nef_hash(nef_path, file_size=None):
+    if file_size is None:
+        file_size = os.path.getsize(nef_path)
+    if file_size > MAX_FILE_BYTES:
         raise ValueError(f"NEF file size exceeds {MAX_FILE_BYTES} bytes")
     with rawpy.imread(nef_path) as raw_file:
         thumbnail = raw_file.extract_thumb()
@@ -81,6 +85,8 @@ def _validate_no_reparse_lineage(path):
         curr = parent
     return None
 
+_VALIDATED_TARGET_DIRS = set()
+
 def _quarantine_file(jpg_path, root_dir, quarantine_dir):
     rel_path = os.path.relpath(jpg_path, root_dir)
     if (
@@ -93,9 +99,12 @@ def _quarantine_file(jpg_path, root_dir, quarantine_dir):
     dest_path = os.path.join(quarantine_dir, rel_path)
     target_dir = os.path.dirname(dest_path)
     os.makedirs(target_dir, exist_ok=True)
-    reparse_target = _validate_no_reparse_lineage(target_dir)
-    if reparse_target:
-        raise OSError(f"Refusing to quarantine through symlink or junction: {reparse_target}")
+    # ⚡ Bolt: Memoize validated target directories to avoid repeating root-to-leaf reparse walks per file
+    if target_dir not in _VALIDATED_TARGET_DIRS:
+        reparse_target = _validate_no_reparse_lineage(target_dir)
+        if reparse_target:
+            raise OSError(f"Refusing to quarantine through symlink or junction: {reparse_target}")
+        _VALIDATED_TARGET_DIRS.add(target_dir)
 
     base, ext = os.path.splitext(dest_path)
     counter = 1
@@ -143,7 +152,7 @@ def process_jpg_file(
     # This turns O(N) expensive image loads/hashes into O(1) for the JPG
     try:
         jpg_size = os.path.getsize(jpg_path)
-        jpg_hash = get_jpg_hash(jpg_path)
+        jpg_hash = get_jpg_hash(jpg_path, file_size=jpg_size)
     except Exception as error:
         if verbose:
             print(f"Could not load/hash JPG {jpg_path}: {error}")
@@ -333,11 +342,12 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 print(f"Progress: {idx}/{total_groups} group(s) checked...")
         return (deleted_count, reclaimed_bytes) if return_stats else deleted_count
 
-    # ⚡ Bolt: Batch prefix groups per future to cut IPC pickling and Future allocation overhead
-    batch_size = 8
+    # ⚡ Bolt: Dynamically scale batch size so medium workloads distribute across available CPU cores
+    cpu_count = os.cpu_count() or 1
+    batch_size = max(1, min(8, len(work_items) // (cpu_count * 2)))
     batches = [work_items[i:i + batch_size] for i in range(0, len(work_items), batch_size)]
     total_batches = len(batches)
-    max_workers = min(os.cpu_count() or 1, total_batches)
+    max_workers = min(cpu_count, total_batches)
     progress_step = 1 if total_batches < 10 else 10
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:

@@ -37,3 +37,7 @@
 ## 2024-11-23 - [PowerShell Loop Fast Fail & Console I/O Avoidance]
 **Learning:** Console output cmdlets like `Write-Host` are surprisingly slow in PowerShell. Placing them inside tight loops before checking if a file actually needs processing causes unnecessary I/O bottleneck when iterating over large collections where most items will be skipped.
 **Action:** Always fetch related cache/collection items first, and use early returns (e.g. `if ($Collection.Count -le 1) { continue }`) to quickly skip elements and bypass subsequent slow console output or complex loop initialization for irrelevant items.
+
+## 2026-11-17 - Source-Filtered Reference Indexing, Strongly-Typed PS Collections & Dynamic Python Batching
+**Learning:** Indexing the entire `$ReferenceFolder` before scanning `$SourceFolder` stores and inspects thousands of unrelated archive file sizes; using PowerShell `@{}` and `Test-Path` inside inner loops adds overhead; and a fixed `batch_size = 8` in `find-duplicated.py` underutilizes multi-core CPUs for medium workloads while `_quarantine_file` repeats root-to-leaf reparse walks per file.
+**Action:** Scan `$SourceFolder` first to filter `$ReferenceFolder` indexing by a `HashSet[long]` of source file sizes, migrate `@{}` caches/tracking sets to strongly-typed `.NET` `Dictionary`/`HashSet`, replace `Test-Path` with `[System.IO.File]::Exists`, pass pre-fetched `file_size` into `get_jpg_hash`, memoize `_VALIDATED_TARGET_DIRS`, and dynamically compute worker batch sizes in `find-duplicated.py`.

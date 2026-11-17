@@ -261,9 +261,9 @@ Write-Host ""
 Write-Host "Checking $($VideosToCheck.Count) videos..."
 Write-Host ""
 
-# ⚡ Bolt: Cache partial hashes to avoid recalculating for candidate video files
-$PartialHashes = @{}
-$MovedFiles = @{}
+# ⚡ Bolt: Cache partial hashes in strongly-typed .NET collections to avoid PowerShell hashtable overhead
+$PartialHashes = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$MovedFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 $VideoIndex = 0
 $TotalVideosToCheck = $VideosToCheck.Count
@@ -274,7 +274,7 @@ $LastPercent = -1
 foreach ($Video in $VideosToCheck) {
     $VideoIndex++
 
-    if ($MovedFiles.ContainsKey($Video.FullName)) { continue }
+    if ($MovedFiles.Contains($Video.FullName)) { continue }
 
     # ⚡ Bolt: O(1) composite Name|Length lookup skips unrelated size collisions before Write-Progress/Write-Host
     $AllCandidatesForName = $VideosByNameAndLength["$($Video.Name)|$($Video.Length)"]
@@ -308,7 +308,7 @@ foreach ($Video in $VideosToCheck) {
     foreach ($Candidate in $OrderedCandidates) {
 
         if ($Candidate.FullName -eq $Video.FullName) { continue }
-        if ($MovedFiles.ContainsKey($Candidate.FullName)) { continue }
+        if ($MovedFiles.Contains($Candidate.FullName)) { continue }
 
         try {
             if (-not $PartialHashes.ContainsKey($Video.FullName)) {
@@ -355,11 +355,11 @@ foreach ($Video in $VideosToCheck) {
                         -ErrorAction Stop
 
                     # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
-                    $MovedFiles[$Video.FullName] = $true
+                    $null = $MovedFiles.Add($Video.FullName)
                     $DuplicatesMoved++
                     $ReclaimedBytes += $Video.Length
                 } elseif ($WhatIfPreference) {
-                    $MovedFiles[$Video.FullName] = $true
+                    $null = $MovedFiles.Add($Video.FullName)
                     $DuplicatesMoved++
                     $ReclaimedBytes += $Video.Length
                 }

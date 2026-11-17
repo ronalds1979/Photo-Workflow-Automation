@@ -93,7 +93,7 @@ elseif ($PSCmdlet.ShouldProcess($QuarantineFolder, "Create quarantine directory"
     }
 }
 
-Write-Host "Building size and hash index for reference folder..."
+Write-Host "Scanning source folder and building matching reference index..."
 
 # ⚡ Bolt: Fast 192 KB partial hash (head + middle + tail) with reusable buffer & SHA256 instance
 $PartialChunkSize = 65536
@@ -226,27 +226,39 @@ function Get-FilesFast {
     return $results
 }
 
-$referenceFilesBySize = @{}
-
-# ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
-foreach ($file in Get-FilesFast -RootPath $ReferenceFolder) {
+# ⚡ Bolt: Scan source folder first so the reference index skips files whose size doesn't exist in source
+$sourceFiles = @(Get-FilesFast -RootPath $SourceFolder)
+$sourceSizes = [System.Collections.Generic.HashSet[long]]::new()
+foreach ($file in $sourceFiles) {
     if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-    $size = $file.Length
-    if (-not $referenceFilesBySize.ContainsKey($size)) {
-        # ⚡ Bolt: Using List[string] instead of @() to avoid O(N²) reallocation on +=
-        $referenceFilesBySize[$size] = [System.Collections.Generic.List[string]]::new()
-    }
-    # ⚡ Bolt: .Add() is O(1) amortized, whereas += on arrays is O(N)
-    $referenceFilesBySize[$size].Add($file.FullName)
+    $null = $sourceSizes.Add($file.Length)
 }
 
-$referencePartialHashes = @{}
-$referenceHashes = @{}
-$MovedFiles = @{}
+$referenceFilesBySize = [System.Collections.Generic.Dictionary[long, System.Collections.Generic.List[string]]]::new()
+
+# ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop and filtered by source sizes
+if ($sourceSizes.Count -gt 0) {
+    foreach ($file in Get-FilesFast -RootPath $ReferenceFolder) {
+        if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        $size = $file.Length
+        if (-not $sourceSizes.Contains($size)) { continue }
+        $list = $null
+        if (-not $referenceFilesBySize.TryGetValue($size, [ref]$list)) {
+            # ⚡ Bolt: Using List[string] instead of @() to avoid O(N²) reallocation on +=
+            $list = [System.Collections.Generic.List[string]]::new()
+            $referenceFilesBySize[$size] = $list
+        }
+        # ⚡ Bolt: .Add() is O(1) amortized, whereas += on arrays is O(N)
+        $list.Add($file.FullName)
+    }
+}
+
+$referencePartialHashes = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$referenceHashes = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$MovedFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 # ⚡ Bolt: Using List instead of @() for efficient O(1) appends
 $duplicates = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-$sourceFiles = @(Get-FilesFast -RootPath $SourceFolder)
 $TotalSourceFiles = $sourceFiles.Count
 $SourceIndex = 0
 $LastPercent = -1
@@ -265,13 +277,13 @@ foreach ($file in $sourceFiles) {
         }
     }
     if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-    if ($MovedFiles.ContainsKey($file.FullName)) { continue }
+    if ($MovedFiles.Contains($file.FullName)) { continue }
     try {
         $size = $file.Length
 
         if ($referenceFilesBySize.ContainsKey($size)) {
             $candidates = $referenceFilesBySize[$size]
-            if ($candidates.Count -eq 1 -and ($file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase) -or $MovedFiles.ContainsKey($candidates[0]))) {
+            if ($candidates.Count -eq 1 -and ($file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase) -or $MovedFiles.Contains($candidates[0]))) {
                 continue
             }
 
@@ -280,7 +292,7 @@ foreach ($file in $sourceFiles) {
 
             foreach ($refFile in $candidates) {
                 if ($file.FullName.Equals($refFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-                if ($MovedFiles.ContainsKey($refFile)) { continue }
+                if ($MovedFiles.Contains($refFile)) { continue }
                 if (-not $referencePartialHashes.ContainsKey($refFile)) {
                     $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile -ExpectedLength $size
                 }
@@ -311,7 +323,7 @@ foreach ($file in $sourceFiles) {
             } else {
                 $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
                 foreach ($refFile in $partialMatches) {
-                    if ($MovedFiles.ContainsKey($refFile)) { continue }
+                    if ($MovedFiles.Contains($refFile)) { continue }
                     if (-not $referenceHashes.ContainsKey($refFile)) {
                         $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
                     }
@@ -331,20 +343,23 @@ foreach ($file in $sourceFiles) {
 
                 $Destination = Join-Path $QuarantineFolder $file.Name
                 $Counter = 1
-                while (Test-Path -LiteralPath $Destination -Force) {
+                if ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination)) {
                     $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
                     $Extension = [System.IO.Path]::GetExtension($file.Name)
-                    $Destination = Join-Path $QuarantineFolder ("{0}_{1}_{2}{3}" -f $BaseName, (Get-Date -Format "yyyyMMdd_HHmmss"), $Counter, $Extension)
-                    $Counter++
+                    $Timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
+                    do {
+                        $Destination = Join-Path $QuarantineFolder ("{0}_{1}_{2}{3}" -f $BaseName, $Timestamp, $Counter, $Extension)
+                        $Counter++
+                    } while ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination))
                 }
 
                 if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $Destination")) {
                     Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
-                    $MovedFiles[$file.FullName] = $true
+                    $null = $MovedFiles.Add($file.FullName)
                     $ReclaimedBytes += $size
                     Write-Host "Moved duplicate to quarantine: $($file.FullName)"
                 } elseif ($WhatIfPreference) {
-                    $MovedFiles[$file.FullName] = $true
+                    $null = $MovedFiles.Add($file.FullName)
                     $ReclaimedBytes += $size
                 }
             }
