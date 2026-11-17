@@ -60,9 +60,20 @@ if ($SourceNormalized.Equals($ReferenceNormalized, [System.StringComparison]::Or
     Write-Error "SourceFolder and ReferenceFolder cannot be the same directory ($SourceFolder)."
     exit 1
 }
+if ($SourceNormalized.StartsWith($ReferenceNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $ReferenceNormalized.StartsWith($SourceNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "SourceFolder and ReferenceFolder cannot overlap ($SourceFolder vs $ReferenceFolder)."
+    exit 1
+}
 if ($QuarantineNormalized.Equals($SourceNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
     $QuarantineNormalized.Equals($ReferenceNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
     Write-Error "QuarantineFolder cannot be the same as SourceFolder or ReferenceFolder ($QuarantineFolder)."
+    exit 1
+}
+if ($SourceNormalized.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $ReferenceNormalized.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $QuarantineNormalized.StartsWith($ReferenceNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "QuarantineFolder ($QuarantineFolder) cannot be an ancestor of SourceFolder/ReferenceFolder or inside ReferenceFolder."
     exit 1
 }
 
@@ -189,6 +200,40 @@ function Format-SafeCsvField {
         return "'" + $Value
     }
     return $Value
+}
+
+function Reserve-QuarantinePath {
+    param(
+        [string]$QuarantineDir,
+        [string]$FileName,
+        [bool]$WhatIfMode = $false
+    )
+    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    $Extension = [System.IO.Path]::GetExtension($FileName)
+    $Timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
+    $Counter = 0
+    while ($true) {
+        $candidateName = if ($Counter -eq 0) { $FileName } else { "{0}_{1}_{2}{3}" -f $BaseName, $Timestamp, $Counter, $Extension }
+        $candidate = Join-Path $QuarantineDir $candidateName
+        $Counter++
+        if ($WhatIfMode) {
+            if (-not ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate))) {
+                return $candidate
+            }
+            continue
+        }
+        if ([System.IO.Directory]::Exists($candidate)) {
+            continue
+        }
+        try {
+            $fs = [System.IO.File]::Open($candidate, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $fs.Dispose()
+            return $candidate
+        }
+        catch [System.IO.IOException] {
+            if ($Counter -gt 10000) { throw }
+        }
+    }
 }
 
 function Get-FilesFast {
@@ -336,25 +381,29 @@ foreach ($file in $sourceFiles) {
             }
 
             if ($matchFound) {
+                $sourceItem = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Write-Warning "Skipping reparse point (symlink/junction): $($file.FullName)"
+                    continue
+                }
+
                 $duplicates.Add([PSCustomObject]@{
                     SourceFile = (Format-SafeCsvField -Value $file.FullName)
                     MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
                 })
 
-                $Destination = Join-Path $QuarantineFolder $file.Name
-                $Counter = 1
-                if ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination)) {
-                    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-                    $Extension = [System.IO.Path]::GetExtension($file.Name)
-                    $Timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
-                    do {
-                        $Destination = Join-Path $QuarantineFolder ("{0}_{1}_{2}{3}" -f $BaseName, $Timestamp, $Counter, $Extension)
-                        $Counter++
-                    } while ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination))
-                }
-
-                if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $Destination")) {
-                    Move-Item -LiteralPath $file.FullName -Destination $Destination -ErrorAction Stop
+                $PreviewDestination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $true
+                if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $PreviewDestination")) {
+                    $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $false
+                    try {
+                        Move-Item -LiteralPath $file.FullName -Destination $Destination -Force -ErrorAction Stop
+                    }
+                    catch {
+                        if ([System.IO.File]::Exists($Destination)) {
+                            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                        }
+                        throw
+                    }
                     $null = $MovedFiles.Add($file.FullName)
                     $ReclaimedBytes += $size
                     Write-Host "Moved duplicate to quarantine: $($file.FullName)"

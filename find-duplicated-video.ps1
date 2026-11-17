@@ -58,10 +58,27 @@ if (Test-HasReparsePointInLineage -Path $QuarantineFolder) {
     exit 1
 }
 
-$DriveRootTrimmed = $DriveRoot.TrimEnd('\', '/')
-$FolderToCheckTrimmed = $FolderToCheck.TrimEnd('\', '/')
-if ($FolderToCheckTrimmed.Equals($DriveRootTrimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
+# 🛡️ Sentinel: Enforce directory boundary and case-insensitive matching to prevent path confusion
+$DriveRootNormalized = $DriveRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$FolderToCheckNormalized = $FolderToCheck.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+
+if ($FolderToCheckNormalized.Equals($DriveRootNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
     Write-Error "FolderToCheck cannot be the same as DriveRoot ($DriveRoot)."
+    exit 1
+}
+if (-not $FolderToCheckNormalized.StartsWith($DriveRootNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "FolderToCheck ($FolderToCheck) must be located inside DriveRoot ($DriveRoot)."
+    exit 1
+}
+if ($QuarantineNormalized.Equals($DriveRootNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $QuarantineNormalized.Equals($FolderToCheckNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "QuarantineFolder cannot be the same as DriveRoot or FolderToCheck ($QuarantineFolder)."
+    exit 1
+}
+if ($DriveRootNormalized.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $FolderToCheckNormalized.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Error "QuarantineFolder ($QuarantineFolder) cannot be an ancestor of DriveRoot or FolderToCheck."
     exit 1
 }
 
@@ -191,9 +208,39 @@ function Compare-FilesExact {
     }
 }
 
-# 🛡️ Sentinel: Enforce directory boundary and case-insensitive matching to prevent path confusion
-$FolderToCheckNormalized = $FolderToCheck.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-$QuarantineNormalized = $QuarantineFolder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+function Reserve-QuarantinePath {
+    param(
+        [string]$QuarantineDir,
+        [string]$FileName,
+        [bool]$WhatIfMode = $false
+    )
+    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    $Extension = [System.IO.Path]::GetExtension($FileName)
+    $Timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
+    $Counter = 0
+    while ($true) {
+        $candidateName = if ($Counter -eq 0) { $FileName } else { "{0}_{1}_{2}{3}" -f $BaseName, $Timestamp, $Counter, $Extension }
+        $candidate = Join-Path $QuarantineDir $candidateName
+        $Counter++
+        if ($WhatIfMode) {
+            if (-not ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate))) {
+                return $candidate
+            }
+            continue
+        }
+        if ([System.IO.Directory]::Exists($candidate)) {
+            continue
+        }
+        try {
+            $fs = [System.IO.File]::Open($candidate, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $fs.Dispose()
+            return $candidate
+        }
+        catch [System.IO.IOException] {
+            if ($Counter -gt 10000) { throw }
+        }
+    }
+}
 
 # ⚡ Bolt: Composite key (Name|Length) eliminates camera filename collisions (e.g. C0001.MP4) before console/progress I/O
 $VideosByNameAndLength = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[System.IO.FileInfo]]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -325,6 +372,11 @@ foreach ($Video in $VideosToCheck) {
             $isExactMatch = ($Video.Length -le ($PartialChunkSize * 3)) -or (Compare-FilesExact -Path1 $Video.FullName -Path2 $Candidate.FullName)
 
             if ($isExactMatch) {
+                $sourceItem = Get-Item -LiteralPath $Video.FullName -Force -ErrorAction Stop
+                if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Write-Warning "Skipping reparse point (symlink/junction): $($Video.FullName)"
+                    break
+                }
 
                 Write-Host ""
                 Write-Host "DUPLICATE FOUND" -ForegroundColor Yellow
@@ -332,27 +384,22 @@ foreach ($Video in $VideosToCheck) {
                 Write-Host "KEEP : $($Candidate.FullName)"
                 Write-Host ""
 
-                $Destination = Join-Path $QuarantineFolder $Video.Name
-
-                # Prevent filename collisions
-                $Counter = 1
-                if ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination)) {
-                    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($Video.Name)
-                    $Extension = [System.IO.Path]::GetExtension($Video.Name)
-                    $Timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
-                    do {
-                        $Destination = Join-Path `
-                            $QuarantineFolder `
-                            ("{0}_{1}_{2}{3}" -f $BaseName, $Timestamp, $Counter, $Extension)
-                        $Counter++
-                    } while ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination))
-                }
-
-                if ($PSCmdlet.ShouldProcess($Video.FullName, "Move duplicate video to $Destination")) {
-                    Move-Item `
-                        -LiteralPath $Video.FullName `
-                        -Destination $Destination `
-                        -ErrorAction Stop
+                $PreviewDestination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $Video.Name -WhatIfMode $true
+                if ($PSCmdlet.ShouldProcess($Video.FullName, "Move duplicate video to $PreviewDestination")) {
+                    $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $Video.Name -WhatIfMode $false
+                    try {
+                        Move-Item `
+                            -LiteralPath $Video.FullName `
+                            -Destination $Destination `
+                            -Force `
+                            -ErrorAction Stop
+                    }
+                    catch {
+                        if ([System.IO.File]::Exists($Destination)) {
+                            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                        }
+                        throw
+                    }
 
                     # ⚡ Bolt: Record the moved file so we don't try to compare against it again later, avoiding errors
                     $null = $MovedFiles.Add($Video.FullName)

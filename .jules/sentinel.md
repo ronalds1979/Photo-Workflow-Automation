@@ -45,3 +45,10 @@
 - Added `MAX_FILE_BYTES` bounds before decoding `.jpg`/`.nef` files in `find-duplicated.py`.
 - Added directory overlap checks, `$MovedFiles` filtering in reference candidate loops, `$PartialSha256.Initialize()` reset, full-chunk stream read helper, `-WhatIf` state tracking, directory-aware collision checks, external-candidate prioritization, and CSV formula sanitization across the PowerShell scripts.
 - Added `.gitignore` and `requirements.txt`.
+
+## 2026-11-17 - Follow-up Audit Hardening
+**Vulnerabilities Remediated:**
+- Rejected parent-child nesting overlaps between `SourceFolder` and `ReferenceFolder` and ancestor/inside overlap with `QuarantineFolder` in `find duplicated based on folder.ps1`, and enforced `FolderToCheck` containment inside `DriveRoot` plus `QuarantineFolder` ancestor checks in `find-duplicated-video.ps1`.
+- Added atomic quarantine file reservation (`Reserve-QuarantinePath` using `FileMode::CreateNew`) and pre-move reparse-point verification across both PowerShell scripts.
+- Added worker-level time-of-use `_is_reparse_point` checks in `get_jpg_hash`, `get_nef_hash`, and `process_jpg_file`, and rejected scan-root/ancestor quarantine directories in `find-duplicated.py`.
+- Added automated regression and security tests in `test_security.py`.

@@ -24,6 +24,8 @@ def format_bytes(num_bytes):
         size /= 1024.0
 
 def get_jpg_hash(jpg_path, file_size=None):
+    if _is_reparse_point(jpg_path):
+        raise OSError(f"Refusing to read symlink or junction: {jpg_path}")
     if file_size is None:
         file_size = os.path.getsize(jpg_path)
     if file_size > MAX_FILE_BYTES:
@@ -35,6 +37,8 @@ def get_jpg_hash(jpg_path, file_size=None):
     return imagehash.phash(jpg_image, hash_size=HASH_SIZE)
 
 def get_nef_hash(nef_path, file_size=None):
+    if _is_reparse_point(nef_path):
+        raise OSError(f"Refusing to read symlink or junction: {nef_path}")
     if file_size is None:
         file_size = os.path.getsize(nef_path)
     if file_size > MAX_FILE_BYTES:
@@ -182,6 +186,8 @@ def process_jpg_file(
             verb = "delete" if delete else "quarantine"
             return f"[DRY-RUN] Would {verb}: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True, jpg_size
         try:
+            if _is_reparse_point(jpg_path):
+                raise OSError(f"Refusing to modify symlink or junction: {jpg_path}")
             if delete:
                 os.remove(jpg_path)
                 action_msg = f"Deleted: {jpg_path}"
@@ -254,6 +260,10 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
         reparse_quarantine = _validate_no_reparse_lineage(quarantine_dir_abs)
         if reparse_quarantine:
             raise ValueError(f"Quarantine directory must not be or traverse a symlink or junction: {reparse_quarantine}")
+        root_norm_dir = os.path.normcase(root_dir).rstrip("\\/") + os.sep
+        quarantine_norm_dir = os.path.normcase(quarantine_dir_abs).rstrip("\\/") + os.sep
+        if quarantine_norm_dir == root_norm_dir or root_norm_dir.startswith(quarantine_norm_dir):
+            raise ValueError(f"Quarantine directory cannot be or contain the scan root directory: {quarantine_dir_abs}")
         if os.path.lexists(quarantine_dir_abs) and not os.path.isdir(quarantine_dir_abs):
             raise ValueError(f"Quarantine path exists and is not a folder: {quarantine_dir_abs}")
     else:
@@ -427,11 +437,17 @@ def main():
         else (None if args.delete else os.path.join(os.path.abspath(args.folder), "_duplicates_quarantine"))
     )
     if effective_quarantine:
-        reparse_quarantine = _validate_no_reparse_lineage(effective_quarantine)
+        effective_quarantine_abs = os.path.abspath(effective_quarantine)
+        root_abs = os.path.abspath(args.folder)
+        reparse_quarantine = _validate_no_reparse_lineage(effective_quarantine_abs)
         if reparse_quarantine:
             parser.error(f"quarantine directory must not be or traverse a symlink or junction: {reparse_quarantine}")
-        if os.path.lexists(effective_quarantine) and not os.path.isdir(effective_quarantine):
-            parser.error(f"quarantine path exists and is not a folder: {effective_quarantine}")
+        root_norm_dir = os.path.normcase(root_abs).rstrip("\\/") + os.sep
+        quarantine_norm_dir = os.path.normcase(effective_quarantine_abs).rstrip("\\/") + os.sep
+        if quarantine_norm_dir == root_norm_dir or root_norm_dir.startswith(quarantine_norm_dir):
+            parser.error(f"quarantine directory cannot be or contain the scan folder: {effective_quarantine_abs}")
+        if os.path.lexists(effective_quarantine_abs) and not os.path.isdir(effective_quarantine_abs):
+            parser.error(f"quarantine path exists and is not a folder: {effective_quarantine_abs}")
 
     try:
         processed_count, reclaimed_bytes = delete_jpgs_with_nef_pairs(
