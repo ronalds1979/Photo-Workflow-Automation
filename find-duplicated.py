@@ -3,6 +3,8 @@ import errno
 import io
 import os
 import shutil
+import signal
+import sys
 import time
 import concurrent.futures
 
@@ -16,6 +18,21 @@ MAX_FILE_BYTES = 150 * 1024 * 1024
 
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
+
+def _use_color():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _style(text, code):
+    if not _use_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _init_worker():
+    """Ignore SIGINT in pool workers so Ctrl+C is handled cleanly by the parent process."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
 
 def format_bytes(num_bytes):
     size = float(num_bytes)
@@ -390,7 +407,11 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
     max_workers = min(cpu_count, total_batches)
     progress_step = 1 if total_batches < 10 else 10
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    executor = concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=_init_worker,
+    )
+    try:
         futures = [
             executor.submit(
                 process_prefix_batch,
@@ -407,24 +428,47 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
             try:
                 for msg, deleted, item_bytes in future.result():
                     if msg:
-                        print(msg)
+                        if msg.startswith("[DRY-RUN]"):
+                            print(_style(msg, "33"))
+                        elif msg.startswith("Error:"):
+                            print(_style(msg, "31"), file=sys.stderr)
+                        else:
+                            print(msg)
                     if deleted:
                         deleted_count += 1
                         reclaimed_bytes += item_bytes
             except Exception as e:
-                print(f"Error processing a file pair: {e}")
+                print(_style(f"Error processing a file pair: {e}", "31"), file=sys.stderr)
             if completed % progress_step == 0 or completed == total_batches:
-                print(f"Progress: {completed}/{total_batches} batch(es) checked...")
+                pct = (completed / total_batches) * 100
+                print(f"Progress: {completed}/{total_batches} batch(es) checked ({pct:.0f}%)...")
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
 
     return (deleted_count, reclaimed_bytes) if return_stats else deleted_count
 
 def main():
     parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Quarantine (or delete with --delete --yes) JPG files paired with NEFs in the "
             "same folder when their perceptual hashes match by at least 98%, ignoring the "
             "last 9 filename-stem characters."
-        )
+        ),
+        epilog=(
+            "Naming rule:\n"
+            "  Files are paired when their stems match after stripping the last 9 characters\n"
+            "  (e.g., DSC_1234_edit0001.jpg pairs with DSC_1234_raw00001.nef). Filenames\n"
+            "  with 13 or fewer characters (such as IMG_0001.jpg) are skipped.\n\n"
+            "Examples:\n"
+            "  python find-duplicated.py \"D:\\Photos\" --dry-run\n"
+            "  python find-duplicated.py \"D:\\Photos\" --verbose\n"
+            "  python find-duplicated.py \"D:\\Photos\" --quarantine \"D:\\Quarantine\"\n"
+            "  python find-duplicated.py \"D:\\Photos\" --delete --yes"
+        ),
     )
     parser.add_argument("folder", help="Folder to scan recursively")
     parser.add_argument(
@@ -480,12 +524,13 @@ def main():
             parser.error(f"quarantine path exists and is not a folder: {effective_quarantine_abs}")
 
     try:
+        print(f"Scan folder: {os.path.abspath(args.folder)} (similarity threshold: {MIN_HASH_SIMILARITY:.0%})")
         if args.dry_run:
-            print("Mode: DRY-RUN (preview only — no files will be modified)")
+            print(_style("Mode: DRY-RUN (preview only — no files will be modified)", "33"))
         elif args.delete:
-            print("Mode: PERMANENT DELETE")
+            print(_style("Mode: PERMANENT DELETE", "31"))
         else:
-            print(f"Mode: QUARANTINE -> {os.path.abspath(effective_quarantine)}")
+            print(_style(f"Mode: QUARANTINE -> {os.path.abspath(effective_quarantine)}", "36"))
         start_time = time.monotonic()
         processed_count, reclaimed_bytes = delete_jpgs_with_nef_pairs(
             args.folder,
@@ -501,18 +546,25 @@ def main():
         else:
             action_word = "Deleted" if args.delete else "Quarantined"
         print(
-            f"{action_word} {processed_count} .jpg file(s) ({format_bytes(reclaimed_bytes)}) with at least "
-            f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity ({elapsed:.2f}s)."
+            _style(
+                f"{action_word} {processed_count} .jpg file(s) ({format_bytes(reclaimed_bytes)}) with at least "
+                f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity ({elapsed:.2f}s).",
+                "32" if processed_count > 0 else "36",
+            )
         )
         if not args.delete and processed_count > 0 and effective_quarantine:
             label = "Target quarantine folder" if args.dry_run else "Quarantine folder"
             print(f"{label}: {os.path.abspath(effective_quarantine)}")
         if args.dry_run and processed_count > 0:
-            print("Tip: Re-run without --dry-run to apply these changes.")
+            print(_style("Tip: Re-run without --dry-run to apply these changes.", "36"))
+        elif processed_count == 0 and not args.verbose:
+            print("Tip: Re-run with --verbose to inspect skipped or non-matching pairs.")
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
+        print(_style("\nOperation cancelled by user.", "33"), file=sys.stderr)
+        sys.exit(130)
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(_style(f"An unexpected error occurred: {e}", "31"), file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -12,8 +12,11 @@
 .PARAMETER QuarantineFolder
     Destination folder where duplicate source files are moved.
 .EXAMPLE
-    .\find` duplicated` based` on` folder.ps1 -SourceFolder "D:\Inbox" -ReferenceFolder "D:\Pictures" -WhatIf
+    .\'find duplicated based on folder.ps1' -SourceFolder "D:\Inbox" -ReferenceFolder "D:\Pictures" -WhatIf
     Previews which duplicate files would be moved without altering disk state or writing a Desktop CSV report.
+.EXAMPLE
+    .\'find duplicated based on folder.ps1' -SourceFolder "D:\Inbox" -ReferenceFolder "D:\Pictures" -QuarantineFolder "D:\Quarantine" -Confirm
+    Interactively prompts before moving each confirmed duplicate file to a custom quarantine folder.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -24,12 +27,12 @@ param(
 )
 
 if ([string]::IsNullOrWhiteSpace($SourceFolder) -or -not (Test-Path -LiteralPath $SourceFolder -PathType Container)) {
-    Write-Error "Source folder does not exist or is not a directory: $SourceFolder"
+    Write-Error "Source folder does not exist or is not a directory: $SourceFolder. Run 'Get-Help .\find duplicated based on folder.ps1 -Examples' for usage."
     exit 1
 }
 
 if ([string]::IsNullOrWhiteSpace($ReferenceFolder) -or -not (Test-Path -LiteralPath $ReferenceFolder -PathType Container)) {
-    Write-Error "Reference folder does not exist or is not a directory: $ReferenceFolder"
+    Write-Error "Reference folder does not exist or is not a directory: $ReferenceFolder. Run 'Get-Help .\find duplicated based on folder.ps1 -Examples' for usage."
     exit 1
 }
 
@@ -203,10 +206,43 @@ function Get-FastPartialHash {
     }
 }
 
-# ⚡ Bolt: Streaming 1 MB block comparison with early exit for single-candidate checks
+# ⚡ Bolt: Streaming 1 MB block comparison with native memcmp (fallback to Enumerable.SequenceEqual) and early exit
 $CompareBufferSize = 1048576
 $CompareBuf1 = New-Object byte[] $CompareBufferSize
 $CompareBuf2 = New-Object byte[] $CompareBufferSize
+$script:FastCompareState = $null
+
+function Initialize-FastByteCompare {
+    if ($null -ne $script:FastCompareState) { return }
+    if (([System.Management.Automation.PSTypeName]'FastByteCompare').Type) {
+        $script:FastCompareState = $true
+        return
+    }
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class FastByteCompare {
+    [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int memcmp(byte[] b1, byte[] b2, UIntPtr count);
+
+    public static bool Equals(byte[] a, byte[] b, int count) {
+        if (count == 0) return true;
+        if (a == null || b == null) return false;
+        if (count < 0 || count > a.Length || count > b.Length) {
+            throw new ArgumentOutOfRangeException("count");
+        }
+        return memcmp(a, b, (UIntPtr)(uint)count) == 0;
+    }
+}
+"@ -ErrorAction Stop
+        $script:FastCompareState = $true
+    }
+    catch {
+        $script:FastCompareState = $false
+    }
+}
 
 function Compare-FilesExact {
     param([string]$Path1, [string]$Path2)
@@ -221,12 +257,15 @@ function Compare-FilesExact {
     try {
         $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         if ($s1.Length -ne $s2.Length) { return $false }
+        Initialize-FastByteCompare
         while ($true) {
             $r1 = Read-FullChunk -Stream $s1 -Buffer $CompareBuf1 -Count $CompareBufferSize
             $r2 = Read-FullChunk -Stream $s2 -Buffer $CompareBuf2 -Count $CompareBufferSize
             if ($r1 -ne $r2) { return $false }
             if ($r1 -eq 0) { return $true }
-            if ($r1 -eq $CompareBufferSize) {
+            if ($script:FastCompareState) {
+                if (-not [FastByteCompare]::Equals($CompareBuf1, $CompareBuf2, $r1)) { return $false }
+            } elseif ($r1 -eq $CompareBufferSize) {
                 if (-not [System.Linq.Enumerable]::SequenceEqual($CompareBuf1, $CompareBuf2)) { return $false }
             } else {
                 $seg1 = [System.ArraySegment[byte]]::new($CompareBuf1, 0, $r1)
@@ -329,6 +368,7 @@ foreach ($file in $sourceFiles) {
 }
 
 $referenceFilesBySize = [System.Collections.Generic.Dictionary[long, System.Collections.Generic.List[string]]]::new()
+[int]$TotalReferenceFiles = 0
 
 # ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop and filtered by source sizes
 if ($sourceSizes.Count -gt 0) {
@@ -344,6 +384,7 @@ if ($sourceSizes.Count -gt 0) {
         }
         # ⚡ Bolt: .Add() is O(1) amortized, whereas += on arrays is O(N)
         $list.Add($file.FullName)
+        $TotalReferenceFiles++
     }
 }
 
@@ -357,122 +398,126 @@ $TotalSourceFiles = $sourceFiles.Count
 $SourceIndex = 0
 $LastPercent = -1
 [long]$ReclaimedBytes = 0
+[int]$ErrorCount = 0
 
-Write-Host "Checking $TotalSourceFiles file(s) in source folder..."
+Write-Host "Indexed $TotalReferenceFiles reference file(s). Checking $TotalSourceFiles source file(s)..."
 
-# ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
-foreach ($file in $sourceFiles) {
-    $SourceIndex++
-    if ($TotalSourceFiles -gt 0) {
-        $Percent = [int](($SourceIndex / $TotalSourceFiles) * 100)
-        if ($Percent -ne $LastPercent) {
-            $LastPercent = $Percent
-            Write-Progress -Activity "Checking source folder for duplicates" -Status "$SourceIndex of $TotalSourceFiles ($($file.Name))" -PercentComplete $Percent
+try {
+    # ⚡ Bolt: Replaced pipeline | ForEach-Object with foreach loop to eliminate significant per-item overhead in large file sets
+    foreach ($file in $sourceFiles) {
+        $SourceIndex++
+        if ($TotalSourceFiles -gt 0) {
+            $Percent = [int](($SourceIndex / $TotalSourceFiles) * 100)
+            if ($Percent -ne $LastPercent) {
+                $LastPercent = $Percent
+                Write-Progress -Activity "Checking source folder for duplicates" -Status "$SourceIndex of $TotalSourceFiles ($($file.Name))" -PercentComplete $Percent
+            }
         }
-    }
-    if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-    if ($MovedFiles.Contains($file.FullName)) { continue }
-    try {
-        $size = $file.Length
+        if ($file.FullName.StartsWith($QuarantineNormalized, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($MovedFiles.Contains($file.FullName)) { continue }
+        try {
+            $size = $file.Length
 
-        if ($referenceFilesBySize.ContainsKey($size)) {
-            $candidates = $referenceFilesBySize[$size]
-            if ($candidates.Count -eq 1 -and ($file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase) -or $MovedFiles.Contains($candidates[0]))) {
-                continue
-            }
-
-            $srcPartial = Get-FastPartialHash -LiteralPath $file.FullName -ExpectedLength $size
-            $partialMatches = [System.Collections.Generic.List[string]]::new()
-
-            foreach ($refFile in $candidates) {
-                if ($file.FullName.Equals($refFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-                if ($MovedFiles.Contains($refFile)) { continue }
-                if (-not $referencePartialHashes.ContainsKey($refFile)) {
-                    $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile -ExpectedLength $size
-                }
-                if ($srcPartial -eq $referencePartialHashes[$refFile]) {
-                    $partialMatches.Add($refFile)
-                }
-            }
-
-            if ($partialMatches.Count -eq 0) { continue }
-
-            $matchFound = $false
-            # ⚡ Bolt: Using List[string] instead of @() for efficient O(1) appends
-            $matchingFiles = [System.Collections.Generic.List[string]]::new()
-
-            if ($size -le ($PartialChunkSize * 3)) {
-                # All bytes of files <= 192 KB were already covered by Get-FastPartialHash
-                $matchFound = $true
-                foreach ($refFile in $partialMatches) {
-                    $matchingFiles.Add($refFile)
-                }
-            } elseif ($partialMatches.Count -eq 1) {
-                # ⚡ Bolt: Streaming early-exit comparison avoids full-file SHA-256 hashing for single-candidate checks
-                $refFile = $partialMatches[0]
-                if (Compare-FilesExact -Path1 $file.FullName -Path2 $refFile) {
-                    $matchFound = $true
-                    $matchingFiles.Add($refFile)
-                }
-            } else {
-                $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-                foreach ($refFile in $partialMatches) {
-                    if ($MovedFiles.Contains($refFile)) { continue }
-                    if (-not $referenceHashes.ContainsKey($refFile)) {
-                        $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
-                    }
-
-                    if ($hash -eq $referenceHashes[$refFile]) {
-                        $matchFound = $true
-                        $matchingFiles.Add($refFile)
-                    }
-                }
-            }
-
-            if ($matchFound) {
-                $sourceItem = Get-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
-                if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    Write-Warning "Skipping reparse point (symlink/junction): $($file.FullName)"
+            if ($referenceFilesBySize.ContainsKey($size)) {
+                $candidates = $referenceFilesBySize[$size]
+                if ($candidates.Count -eq 1 -and ($file.FullName.Equals($candidates[0], [System.StringComparison]::OrdinalIgnoreCase) -or $MovedFiles.Contains($candidates[0]))) {
                     continue
                 }
 
-                $PreviewDestination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $true
-                if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $PreviewDestination")) {
-                    $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $false
-                    try {
-                        Move-Item -LiteralPath $file.FullName -Destination $Destination -Force -ErrorAction Stop
+                $srcPartial = Get-FastPartialHash -LiteralPath $file.FullName -ExpectedLength $size
+                $partialMatches = [System.Collections.Generic.List[string]]::new()
+
+                foreach ($refFile in $candidates) {
+                    if ($file.FullName.Equals($refFile, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                    if ($MovedFiles.Contains($refFile)) { continue }
+                    if (-not $referencePartialHashes.ContainsKey($refFile)) {
+                        $referencePartialHashes[$refFile] = Get-FastPartialHash -LiteralPath $refFile -ExpectedLength $size
                     }
-                    catch {
-                        if ([System.IO.File]::Exists($Destination)) {
-                            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                    if ($srcPartial -eq $referencePartialHashes[$refFile]) {
+                        $partialMatches.Add($refFile)
+                    }
+                }
+
+                if ($partialMatches.Count -eq 0) { continue }
+
+                $matchFound = $false
+                # ⚡ Bolt: Using List[string] instead of @() for efficient O(1) appends
+                $matchingFiles = [System.Collections.Generic.List[string]]::new()
+
+                if ($size -le ($PartialChunkSize * 3)) {
+                    # All bytes of files <= 192 KB were already covered by Get-FastPartialHash
+                    $matchFound = $true
+                    foreach ($refFile in $partialMatches) {
+                        $matchingFiles.Add($refFile)
+                    }
+                } elseif ($partialMatches.Count -eq 1) {
+                    # ⚡ Bolt: Streaming early-exit comparison avoids full-file SHA-256 hashing for single-candidate checks
+                    $refFile = $partialMatches[0]
+                    if (Compare-FilesExact -Path1 $file.FullName -Path2 $refFile) {
+                        $matchFound = $true
+                        $matchingFiles.Add($refFile)
+                    }
+                } else {
+                    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                    foreach ($refFile in $partialMatches) {
+                        if ($MovedFiles.Contains($refFile)) { continue }
+                        if (-not $referenceHashes.ContainsKey($refFile)) {
+                            $referenceHashes[$refFile] = (Get-FileHash -LiteralPath $refFile -Algorithm SHA256 -ErrorAction Stop).Hash
                         }
-                        throw
+
+                        if ($hash -eq $referenceHashes[$refFile]) {
+                            $matchFound = $true
+                            $matchingFiles.Add($refFile)
+                        }
                     }
-                    $duplicates.Add([PSCustomObject]@{
-                        SourceFile = (Format-SafeCsvField -Value $file.FullName)
-                        MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
-                    })
-                    $null = $MovedFiles.Add($file.FullName)
-                    $ReclaimedBytes += $size
-                    Write-Host "Moved duplicate to quarantine: $($file.FullName)"
-                } elseif ($WhatIfPreference) {
-                    $duplicates.Add([PSCustomObject]@{
-                        SourceFile = (Format-SafeCsvField -Value $file.FullName)
-                        MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
-                    })
-                    $null = $MovedFiles.Add($file.FullName)
-                    $ReclaimedBytes += $size
+                }
+
+                if ($matchFound) {
+                    if (([System.IO.File]::GetAttributes($file.FullName) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        Write-Warning "Skipping reparse point (symlink/junction): $($file.FullName)"
+                        continue
+                    }
+
+                    $PreviewDestination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $true
+                    if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $PreviewDestination")) {
+                        $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $false
+                        try {
+                            Move-Item -LiteralPath $file.FullName -Destination $Destination -Force -ErrorAction Stop
+                        }
+                        catch {
+                            if ([System.IO.File]::Exists($Destination)) {
+                                Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                            }
+                            throw
+                        }
+                        $duplicates.Add([PSCustomObject]@{
+                            SourceFile = (Format-SafeCsvField -Value $file.FullName)
+                            MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
+                        })
+                        $null = $MovedFiles.Add($file.FullName)
+                        $ReclaimedBytes += $size
+                        Write-Host "Moved duplicate ($(Format-ByteSize -Bytes $size)): $($file.FullName) [KEEP: $($matchingFiles[0])]"
+                    } elseif ($WhatIfPreference) {
+                        $duplicates.Add([PSCustomObject]@{
+                            SourceFile = (Format-SafeCsvField -Value $file.FullName)
+                            MatchingFiles = (Format-SafeCsvField -Value ($matchingFiles -join "; "))
+                        })
+                        $null = $MovedFiles.Add($file.FullName)
+                        $ReclaimedBytes += $size
+                    }
                 }
             }
         }
-    }
-    catch {
-        Write-Warning "Failed to process: $($file.FullName) - $($_.Exception.Message)"
+        catch {
+            $ErrorCount++
+            Write-Warning "Failed to process: $($file.FullName) - $($_.Exception.Message)"
+        }
     }
 }
-
-Write-Progress -Activity "Checking source folder for duplicates" -Completed
-$PartialSha256.Dispose()
+finally {
+    Write-Progress -Activity "Checking source folder for duplicates" -Completed
+    $PartialSha256.Dispose()
+}
 $Stopwatch.Stop()
 $ElapsedText = $Stopwatch.Elapsed.TotalSeconds.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
 $FormattedSize = Format-ByteSize -Bytes $ReclaimedBytes
@@ -484,24 +529,30 @@ if ($WhatIfPreference) {
     Write-Host "Duplicates that would be moved : $($duplicates.Count)"
     Write-Host "Space that would be reclaimed  : $FormattedSize"
     Write-Host "Target quarantine folder       : $QuarantineFolder"
-} else {
-    $DesktopDir = [Environment]::GetFolderPath('Desktop')
-    $ReportDir = if (-not [string]::IsNullOrWhiteSpace($DesktopDir) -and (Test-Path -LiteralPath $DesktopDir -PathType Container)) {
-        $DesktopDir
-    } else {
-        $QuarantineFolder
+    if ($duplicates.Count -gt 0) {
+        Write-Host "Tip: Re-run without -WhatIf to move these duplicate files and export the CSV report."
     }
+} else {
     $reportSaved = $false
-    if (Test-HasReparsePointInLineage -Path $ReportDir) {
-        Write-Warning "Refusing to export report into reparse-point path: $ReportDir"
-    } else {
-        $ReportFile = Join-Path $ReportDir "DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
-        try {
-            $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
-            $reportSaved = $true
+    $ReportFile = $null
+    if ($duplicates.Count -gt 0) {
+        $DesktopDir = [Environment]::GetFolderPath('Desktop')
+        $ReportDir = if (-not [string]::IsNullOrWhiteSpace($DesktopDir) -and (Test-Path -LiteralPath $DesktopDir -PathType Container)) {
+            $DesktopDir
+        } else {
+            $QuarantineFolder
         }
-        catch {
-            Write-Warning "Failed to export report: $($_.Exception.Message)"
+        if (Test-HasReparsePointInLineage -Path $ReportDir) {
+            Write-Warning "Refusing to export report into reparse-point path: $ReportDir"
+        } else {
+            $ReportFile = Join-Path $ReportDir "DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
+            try {
+                $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
+                $reportSaved = $true
+            }
+            catch {
+                Write-Warning "Failed to export report: $($_.Exception.Message)"
+            }
         }
     }
 
@@ -512,5 +563,10 @@ if ($WhatIfPreference) {
     Write-Host "Quarantine folder : $QuarantineFolder"
     if ($reportSaved) {
         Write-Host "Report saved to   : $ReportFile"
+    } elseif ($duplicates.Count -eq 0) {
+        Write-Host "Report            : Not created (no duplicates found)"
     }
+}
+if ($ErrorCount -gt 0) {
+    Write-Host "Errors / skipped  : $ErrorCount"
 }
