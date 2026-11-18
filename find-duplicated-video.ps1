@@ -21,8 +21,10 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$FolderToCheck = "D:\Other files and trash videos",
-    [string]$DriveRoot = "D:\",
+    [Parameter(Mandatory = $true, HelpMessage = "Folder containing candidate duplicate videos to check.")]
+    [string]$FolderToCheck,
+    [Parameter(Mandatory = $true, HelpMessage = "Root drive or reference folder to search for existing videos.")]
+    [string]$DriveRoot,
     [string]$QuarantineFolder = "D:\DuplicateVideosFound"
 )
 
@@ -185,7 +187,7 @@ function Get-FastPartialHash {
     if (([System.IO.File]::GetAttributes($LiteralPath) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $LiteralPath")
     }
-    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
         $PartialSha256.Initialize()
         $len = $stream.Length
@@ -234,6 +236,7 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class FastByteCompare {
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
     private static extern int memcmp(byte[] b1, byte[] b2, UIntPtr count);
 
@@ -262,10 +265,10 @@ function Compare-FilesExact {
     if (([System.IO.File]::GetAttributes($Path2) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $Path2")
     }
-    $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $s2 = $null
     try {
-        $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         if ($s1.Length -ne $s2.Length) { return $false }
         Initialize-FastByteCompare
         while ($true) {
@@ -318,6 +321,7 @@ function Reserve-QuarantinePath {
             return $candidate
         }
         catch [System.IO.IOException] {
+            if (-not ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate))) { throw }
             if ($Counter -gt 10000) { throw }
         }
     }
@@ -496,20 +500,23 @@ if ($TotalVideosToCheck -eq 0) {
                             break
                         }
 
-                        Write-Host ""
-                        if ([string]::IsNullOrEmpty($env:NO_COLOR)) {
-                            Write-Host "DUPLICATE FOUND" -ForegroundColor Yellow
-                        } else {
-                            Write-Host "DUPLICATE FOUND"
-                        }
-                        Write-Host "MOVE : $($Video.FullName)"
-                        Write-Host "KEEP : $($Candidate.FullName)"
-                        Write-Host ""
-
+                        $VideoSizeFormatted = Format-ByteSize -Bytes $Video.Length
                         $PreviewDestination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $Video.Name -WhatIfMode $true
                         if ($PSCmdlet.ShouldProcess($Video.FullName, "Move duplicate video to $PreviewDestination")) {
+                            Write-Host ""
+                            if ([string]::IsNullOrEmpty($env:NO_COLOR)) {
+                                Write-Host "DUPLICATE FOUND ($VideoSizeFormatted)" -ForegroundColor Yellow
+                            } else {
+                                Write-Host "DUPLICATE FOUND ($VideoSizeFormatted)"
+                            }
+                            Write-Host "MOVE : $($Video.FullName)"
+                            Write-Host "KEEP : $($Candidate.FullName)"
+                            Write-Host ""
                             $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $Video.Name -WhatIfMode $false
                             try {
+                                if (([System.IO.File]::GetAttributes($Destination) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                                    throw [System.IO.IOException]::new("Refusing to move into reparse point destination: $Destination")
+                                }
                                 Move-Item `
                                     -LiteralPath $Video.FullName `
                                     -Destination $Destination `
@@ -528,6 +535,11 @@ if ($TotalVideosToCheck -eq 0) {
                             $DuplicatesMoved++
                             $ReclaimedBytes += $Video.Length
                         } elseif ($WhatIfPreference) {
+                            Write-Host ""
+                            Write-Host "[WHATIF] DUPLICATE FOUND ($VideoSizeFormatted)"
+                            Write-Host "MOVE : $($Video.FullName)"
+                            Write-Host "KEEP : $($Candidate.FullName)"
+                            Write-Host ""
                             $null = $MovedFiles.Add($Video.FullName)
                             $DuplicatesMoved++
                             $ReclaimedBytes += $Video.Length

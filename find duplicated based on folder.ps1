@@ -21,8 +21,10 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$SourceFolder = "D:\Other files and trash videos",
-    [string]$ReferenceFolder = "D:\Original\Pictures",
+    [Parameter(Mandatory = $true, HelpMessage = "Folder containing candidate duplicate files to check.")]
+    [string]$SourceFolder,
+    [Parameter(Mandatory = $true, HelpMessage = "Reference folder containing original files to keep.")]
+    [string]$ReferenceFolder,
     [string]$QuarantineFolder = "D:\DuplicateFilesFound"
 )
 
@@ -175,7 +177,7 @@ function Get-FastPartialHash {
     if (([System.IO.File]::GetAttributes($LiteralPath) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $LiteralPath")
     }
-    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
         $PartialSha256.Initialize()
         $len = $stream.Length
@@ -224,6 +226,7 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class FastByteCompare {
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
     private static extern int memcmp(byte[] b1, byte[] b2, UIntPtr count);
 
@@ -252,10 +255,10 @@ function Compare-FilesExact {
     if (([System.IO.File]::GetAttributes($Path2) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw [System.IO.IOException]::new("Refusing to read reparse point (symlink/junction): $Path2")
     }
-    $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $s1 = [System.IO.File]::Open($Path1, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $s2 = $null
     try {
-        $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $s2 = [System.IO.File]::Open($Path2, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         if ($s1.Length -ne $s2.Length) { return $false }
         Initialize-FastByteCompare
         while ($true) {
@@ -319,6 +322,7 @@ function Reserve-QuarantinePath {
             return $candidate
         }
         catch [System.IO.IOException] {
+            if (-not ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate))) { throw }
             if ($Counter -gt 10000) { throw }
         }
     }
@@ -482,6 +486,9 @@ try {
                     if ($PSCmdlet.ShouldProcess($file.FullName, "Move duplicate file to $PreviewDestination")) {
                         $Destination = Reserve-QuarantinePath -QuarantineDir $QuarantineFolder -FileName $file.Name -WhatIfMode $false
                         try {
+                            if (([System.IO.File]::GetAttributes($Destination) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                                throw [System.IO.IOException]::new("Refusing to move into reparse point destination: $Destination")
+                            }
                             Move-Item -LiteralPath $file.FullName -Destination $Destination -Force -ErrorAction Stop
                         }
                         catch {
@@ -504,6 +511,7 @@ try {
                         })
                         $null = $MovedFiles.Add($file.FullName)
                         $ReclaimedBytes += $size
+                        Write-Host "[WHATIF] Would move ($(Format-ByteSize -Bytes $size)): $($file.FullName) [KEEP: $($matchingFiles[0])]"
                     }
                 }
             }

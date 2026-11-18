@@ -19,14 +19,29 @@ MAX_FILE_BYTES = 150 * 1024 * 1024
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
 
-def _use_color():
-    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+def _use_color(stream=None):
+    target = sys.stdout if stream is None else stream
+    return target.isatty() and not os.environ.get("NO_COLOR")
 
 
-def _style(text, code):
-    if not _use_color():
+def _style(text, code, stream=None):
+    if not _use_color(stream):
         return text
     return f"\033[{code}m{text}\033[0m"
+
+
+def _emit_worker_message(msg):
+    """Style and route a worker message to stdout or stderr; return True if it was an error."""
+    if not msg:
+        return False
+    if msg.startswith("[DRY-RUN]"):
+        print(_style(msg, "33", sys.stdout))
+        return False
+    if msg.startswith("Error:"):
+        print(_style(msg, "31", sys.stderr), file=sys.stderr)
+        return True
+    print(msg)
+    return False
 
 
 def _init_worker():
@@ -48,7 +63,8 @@ def get_jpg_hash(jpg_path, file_size=None):
         file_size = os.path.getsize(jpg_path)
     if file_size > MAX_FILE_BYTES:
         raise ValueError(f"JPG file size exceeds {MAX_FILE_BYTES} bytes")
-    with Image.open(jpg_path) as jpg_file:
+    fd = os.open(jpg_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as f, Image.open(f) as jpg_file:
         # ⚡ Bolt: Use libjpeg DCT downscaling + grayscale draft mode before EXIF transpose (phash resizes to 128x128)
         jpg_file.draft("L", (256, 256))
         jpg_image = ImageOps.exif_transpose(jpg_file)
@@ -199,7 +215,7 @@ def process_jpg_file(
         jpg_hash = get_jpg_hash(jpg_path, file_size=jpg_size)
     except Exception as error:
         if verbose:
-            print(f"Could not load/hash JPG {jpg_path}: {error}")
+            return f"Error: Could not load/hash JPG {jpg_path}: {error}", False, 0
         return None, False, 0
 
     for nef_path in nef_paths:
@@ -213,7 +229,7 @@ def process_jpg_file(
             similarity = compare_hashes(jpg_hash, nef_hash)
         except Exception as error:
             if verbose:
-                print(f"Could not validate {jpg_path} against {nef_path}: {error}")
+                print(_style(f"Error: Could not validate {jpg_path} against {nef_path}: {error}", "31", sys.stderr), file=sys.stderr)
             continue
 
         if best_similarity is None or similarity > best_similarity:
@@ -313,6 +329,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
 
     deleted_count = 0
     reclaimed_bytes = 0
+    error_count = 0
     scanned_dirs = 0
     total_nefs = 0
     total_jpgs = 0
@@ -372,7 +389,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
 
     if not work_items:
         print(f"Scanned {scanned_dirs} folder(s) ({total_nefs} NEF(s), {total_jpgs} JPG(s)): no matching NEF/JPG prefix pairs found.")
-        return (0, 0) if return_stats else 0
+        return (0, 0, 0) if return_stats else 0
 
     total_candidate_jpgs = sum(len(group_jpgs) for group_jpgs, _ in work_items)
     print(f"Scanned {scanned_dirs} folder(s): found {total_candidate_jpgs} candidate JPG(s) across {len(work_items)} NEF prefix group(s).")
@@ -390,14 +407,14 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 root_dir=root_dir,
                 quarantine_dir=quarantine_dir_abs,
             ):
-                if msg:
-                    print(msg)
+                if _emit_worker_message(msg):
+                    error_count += 1
                 if deleted:
                     deleted_count += 1
                     reclaimed_bytes += item_bytes
             if total_groups >= 4 and (idx % 4 == 0 or idx == total_groups):
                 print(f"Progress: {idx}/{total_groups} group(s) checked...")
-        return (deleted_count, reclaimed_bytes) if return_stats else deleted_count
+        return (deleted_count, reclaimed_bytes, error_count) if return_stats else deleted_count
 
     # ⚡ Bolt: Dynamically scale batch size so medium workloads distribute across available CPU cores
     cpu_count = os.cpu_count() or 1
@@ -427,18 +444,14 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
         for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             try:
                 for msg, deleted, item_bytes in future.result():
-                    if msg:
-                        if msg.startswith("[DRY-RUN]"):
-                            print(_style(msg, "33"))
-                        elif msg.startswith("Error:"):
-                            print(_style(msg, "31"), file=sys.stderr)
-                        else:
-                            print(msg)
+                    if _emit_worker_message(msg):
+                        error_count += 1
                     if deleted:
                         deleted_count += 1
                         reclaimed_bytes += item_bytes
             except Exception as e:
-                print(_style(f"Error processing a file pair: {e}", "31"), file=sys.stderr)
+                error_count += 1
+                print(_style(f"Error processing a file pair: {e}", "31", sys.stderr), file=sys.stderr)
             if completed % progress_step == 0 or completed == total_batches:
                 pct = (completed / total_batches) * 100
                 print(f"Progress: {completed}/{total_batches} batch(es) checked ({pct:.0f}%)...")
@@ -448,7 +461,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
     else:
         executor.shutdown(wait=True)
 
-    return (deleted_count, reclaimed_bytes) if return_stats else deleted_count
+    return (deleted_count, reclaimed_bytes, error_count) if return_stats else deleted_count
 
 def main():
     parser = argparse.ArgumentParser(
@@ -532,7 +545,7 @@ def main():
         else:
             print(_style(f"Mode: QUARANTINE -> {os.path.abspath(effective_quarantine)}", "36"))
         start_time = time.monotonic()
-        processed_count, reclaimed_bytes = delete_jpgs_with_nef_pairs(
+        processed_count, reclaimed_bytes, error_count = delete_jpgs_with_nef_pairs(
             args.folder,
             verbose=args.verbose,
             dry_run=args.dry_run,
@@ -552,6 +565,8 @@ def main():
                 "32" if processed_count > 0 else "36",
             )
         )
+        if error_count > 0:
+            print(_style(f"Errors / skipped: {error_count}", "33", sys.stderr), file=sys.stderr)
         if not args.delete and processed_count > 0 and effective_quarantine:
             label = "Target quarantine folder" if args.dry_run else "Quarantine folder"
             print(f"{label}: {os.path.abspath(effective_quarantine)}")
@@ -560,10 +575,10 @@ def main():
         elif processed_count == 0 and not args.verbose:
             print("Tip: Re-run with --verbose to inspect skipped or non-matching pairs.")
     except KeyboardInterrupt:
-        print(_style("\nOperation cancelled by user.", "33"), file=sys.stderr)
+        print(_style("\nOperation cancelled by user.", "33", sys.stderr), file=sys.stderr)
         sys.exit(130)
     except Exception as e:
-        print(_style(f"An unexpected error occurred: {e}", "31"), file=sys.stderr)
+        print(_style(f"An unexpected error occurred: {e}", "31", sys.stderr), file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
