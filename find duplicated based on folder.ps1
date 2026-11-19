@@ -25,7 +25,8 @@ param(
     [string]$SourceFolder,
     [Parameter(Mandatory = $true, HelpMessage = "Reference folder containing original files to keep.")]
     [string]$ReferenceFolder,
-    [string]$QuarantineFolder = "D:\DuplicateFilesFound"
+    [string]$QuarantineFolder = "",
+    [string]$ReportPath = ""
 )
 
 if ([string]::IsNullOrWhiteSpace($SourceFolder) -or -not (Test-Path -LiteralPath $SourceFolder -PathType Container)) {
@@ -38,13 +39,13 @@ if ([string]::IsNullOrWhiteSpace($ReferenceFolder) -or -not (Test-Path -LiteralP
     exit 1
 }
 
-if ([string]::IsNullOrWhiteSpace($QuarantineFolder)) {
-    Write-Error "Quarantine folder path cannot be empty."
-    exit 1
-}
-
 $SourceFolder = [System.IO.Path]::GetFullPath($SourceFolder)
 $ReferenceFolder = [System.IO.Path]::GetFullPath($ReferenceFolder)
+if ([string]::IsNullOrWhiteSpace($QuarantineFolder)) {
+    $sourceParent = [System.IO.Path]::GetDirectoryName($SourceFolder.TrimEnd('\', '/'))
+    if ([string]::IsNullOrWhiteSpace($sourceParent)) { $sourceParent = $SourceFolder }
+    $QuarantineFolder = Join-Path $sourceParent "_duplicates_quarantine"
+}
 $QuarantineFolder = [System.IO.Path]::GetFullPath($QuarantineFolder)
 
 function Test-HasReparsePointInLineage {
@@ -328,6 +329,8 @@ function Reserve-QuarantinePath {
     }
 }
 
+$script:SkippedDirs = 0
+
 function Get-FilesFast {
     param([string]$RootPath)
     if ($PSVersionTable.PSVersion.Major -ge 7) {
@@ -357,7 +360,7 @@ function Get-FilesFast {
                 }
             }
         } catch {
-            # Ignore inaccessible directories
+            $script:SkippedDirs++
         }
     }
     return $results
@@ -544,16 +547,23 @@ if ($WhatIfPreference) {
     $reportSaved = $false
     $ReportFile = $null
     if ($duplicates.Count -gt 0) {
-        $DesktopDir = [Environment]::GetFolderPath('Desktop')
-        $ReportDir = if (-not [string]::IsNullOrWhiteSpace($DesktopDir) -and (Test-Path -LiteralPath $DesktopDir -PathType Container)) {
-            $DesktopDir
+        if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+            $ReportFile = [System.IO.Path]::GetFullPath($ReportPath)
+            $ReportDir = [System.IO.Path]::GetDirectoryName($ReportFile)
         } else {
-            $QuarantineFolder
-        }
-        if (Test-HasReparsePointInLineage -Path $ReportDir) {
-            Write-Warning "Refusing to export report into reparse-point path: $ReportDir"
-        } else {
+            $DesktopDir = [Environment]::GetFolderPath('Desktop')
+            $ReportDir = if (-not [string]::IsNullOrWhiteSpace($DesktopDir) -and (Test-Path -LiteralPath $DesktopDir -PathType Container)) {
+                $DesktopDir
+            } else {
+                $QuarantineFolder
+            }
             $ReportFile = Join-Path $ReportDir "DuplicateFilesReport_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').csv"
+        }
+        if ([string]::IsNullOrWhiteSpace($ReportDir) -or -not (Test-Path -LiteralPath $ReportDir -PathType Container)) {
+            Write-Warning "Report directory does not exist: $ReportDir"
+        } elseif ((Test-HasReparsePointInLineage -Path $ReportDir) -or (Test-HasReparsePointInLineage -Path $ReportFile)) {
+            Write-Warning "Refusing to export report into reparse-point path: $ReportFile"
+        } else {
             try {
                 $duplicates | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
                 $reportSaved = $true
@@ -574,6 +584,9 @@ if ($WhatIfPreference) {
     } elseif ($duplicates.Count -eq 0) {
         Write-Host "Report            : Not created (no duplicates found)"
     }
+}
+if ($script:SkippedDirs -gt 0) {
+    Write-Host "Skipped inaccessible folders: $($script:SkippedDirs)"
 }
 if ($ErrorCount -gt 0) {
     Write-Host "Errors / skipped  : $ErrorCount"

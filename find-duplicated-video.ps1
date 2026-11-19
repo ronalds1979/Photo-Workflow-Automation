@@ -25,7 +25,8 @@ param(
     [string]$FolderToCheck,
     [Parameter(Mandatory = $true, HelpMessage = "Root drive or reference folder to search for existing videos.")]
     [string]$DriveRoot,
-    [string]$QuarantineFolder = "D:\DuplicateVideosFound"
+    [string]$QuarantineFolder = "",
+    [string]$ReportPath = ""
 )
 
 if ([string]::IsNullOrWhiteSpace($DriveRoot) -or -not (Test-Path -LiteralPath $DriveRoot -PathType Container)) {
@@ -38,13 +39,13 @@ if ([string]::IsNullOrWhiteSpace($FolderToCheck) -or -not (Test-Path -LiteralPat
     exit 1
 }
 
-if ([string]::IsNullOrWhiteSpace($QuarantineFolder)) {
-    Write-Error "Quarantine folder path cannot be empty."
-    exit 1
-}
-
 $DriveRoot = [System.IO.Path]::GetFullPath($DriveRoot)
 $FolderToCheck = [System.IO.Path]::GetFullPath($FolderToCheck)
+if ([string]::IsNullOrWhiteSpace($QuarantineFolder)) {
+    $folderParent = [System.IO.Path]::GetDirectoryName($FolderToCheck.TrimEnd('\', '/'))
+    if ([string]::IsNullOrWhiteSpace($folderParent)) { $folderParent = $DriveRoot }
+    $QuarantineFolder = Join-Path $folderParent "_duplicate_videos_quarantine"
+}
 $QuarantineFolder = [System.IO.Path]::GetFullPath($QuarantineFolder)
 
 function Test-HasReparsePointInLineage {
@@ -292,6 +293,20 @@ function Compare-FilesExact {
     }
 }
 
+function Format-SafeCsvField {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    $trimmedStart = $Value.TrimStart()
+    if ($Value[0] -in @('=', '+', '-', '@', "`t", "`r", "`n") -or
+        (-not [string]::IsNullOrEmpty($trimmedStart) -and $trimmedStart[0] -in @('=', '+', '-', '@'))) {
+        return "'" + $Value
+    }
+    return $Value
+}
+
+$script:SkippedDirs = 0
+$videoReportRows = [System.Collections.Generic.List[PSCustomObject]]::new()
+
 function Reserve-QuarantinePath {
     param(
         [string]$QuarantineDir,
@@ -407,7 +422,7 @@ function Invoke-VideoScan {
                 }
             }
         } catch {
-            # Ignore inaccessible directories
+            $script:SkippedDirs++
         }
     }
 }
@@ -534,6 +549,12 @@ if ($TotalVideosToCheck -eq 0) {
                             $null = $MovedFiles.Add($Video.FullName)
                             $DuplicatesMoved++
                             $ReclaimedBytes += $Video.Length
+                            $videoReportRows.Add([PSCustomObject]@{
+                                MovedVideo = (Format-SafeCsvField -Value $Video.FullName)
+                                KeptCopy = (Format-SafeCsvField -Value $Candidate.FullName)
+                                SizeBytes = $Video.Length
+                                Destination = (Format-SafeCsvField -Value $Destination)
+                            })
                         } elseif ($WhatIfPreference) {
                             Write-Host ""
                             Write-Host "[WHATIF] DUPLICATE FOUND ($VideoSizeFormatted)"
@@ -543,6 +564,12 @@ if ($TotalVideosToCheck -eq 0) {
                             $null = $MovedFiles.Add($Video.FullName)
                             $DuplicatesMoved++
                             $ReclaimedBytes += $Video.Length
+                            $videoReportRows.Add([PSCustomObject]@{
+                                MovedVideo = (Format-SafeCsvField -Value $Video.FullName)
+                                KeptCopy = (Format-SafeCsvField -Value $Candidate.FullName)
+                                SizeBytes = $Video.Length
+                                Destination = (Format-SafeCsvField -Value $PreviewDestination)
+                            })
                         }
 
                         break
@@ -577,9 +604,34 @@ if ($WhatIfPreference) {
         Write-Host "Tip: Re-run without -WhatIf to move these duplicate videos to quarantine."
     }
 } else {
+    $reportSaved = $false
+    $ReportFile = $null
+    if ($videoReportRows.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($ReportPath)) {
+        $ReportFile = [System.IO.Path]::GetFullPath($ReportPath)
+        $ReportDir = [System.IO.Path]::GetDirectoryName($ReportFile)
+        if ([string]::IsNullOrWhiteSpace($ReportDir) -or -not (Test-Path -LiteralPath $ReportDir -PathType Container)) {
+            Write-Warning "Report directory does not exist: $ReportDir"
+        } elseif ((Test-HasReparsePointInLineage -Path $ReportDir) -or (Test-HasReparsePointInLineage -Path $ReportFile)) {
+            Write-Warning "Refusing to export report into reparse-point path: $ReportFile"
+        } else {
+            try {
+                $videoReportRows | Export-Csv -LiteralPath $ReportFile -NoTypeInformation -NoClobber -ErrorAction Stop
+                $reportSaved = $true
+            }
+            catch {
+                Write-Warning "Failed to export report: $($_.Exception.Message)"
+            }
+        }
+    }
     Write-Host "Finished in ${ElapsedText}s."
     Write-Host "Duplicates moved  : $DuplicatesMoved ($FormattedSize)"
     Write-Host "Duplicates moved to: $QuarantineFolder"
+    if ($reportSaved) {
+        Write-Host "Report saved to   : $ReportFile"
+    }
+}
+if ($script:SkippedDirs -gt 0) {
+    Write-Host "Skipped inaccessible folders: $($script:SkippedDirs)"
 }
 if ($ErrorCount -gt 0) {
     Write-Host "Errors / skipped  : $ErrorCount"

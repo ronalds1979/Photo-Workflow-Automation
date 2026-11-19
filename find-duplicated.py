@@ -1,4 +1,6 @@
 import argparse
+import csv
+import ctypes
 import errno
 import io
 import os
@@ -18,10 +20,56 @@ MAX_FILE_BYTES = 150 * 1024 * 1024
 
 HASH_SIZE = 32
 MIN_HASH_SIMILARITY = 0.98
+_FORCE_NO_COLOR = False
+_VT_ENABLED = None
+
+
+def _enable_windows_vt():
+    global _VT_ENABLED
+    if _VT_ENABLED is not None:
+        return _VT_ENABLED
+    if os.name != "nt":
+        _VT_ENABLED = True
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            if kernel32.SetConsoleMode(handle, mode.value | 0x0004):  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                _VT_ENABLED = True
+                return True
+    except Exception:
+        pass
+    _VT_ENABLED = False
+    return False
+
 
 def _use_color(stream=None):
+    if _FORCE_NO_COLOR or os.environ.get("NO_COLOR"):
+        return False
     target = sys.stdout if stream is None else stream
-    return target.isatty() and not os.environ.get("NO_COLOR")
+    return target.isatty() and _enable_windows_vt()
+
+
+def _safe_csv_field(value):
+    text = "" if value is None else str(value)
+    if not text:
+        return text
+    stripped = text.lstrip()
+    if text[0] in ("=", "+", "-", "@", "\t", "\r", "\n") or (stripped and stripped[0] in ("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def _format_eta(elapsed, completed, total):
+    if completed <= 0 or total <= completed or elapsed < 0.2:
+        return f"elapsed {elapsed:.1f}s"
+    rate = completed / elapsed
+    remaining = (total - completed) / rate if rate > 0 else 0.0
+    if remaining >= 60:
+        return f"elapsed {elapsed:.0f}s, ~{remaining / 60:.1f}m left"
+    return f"elapsed {elapsed:.0f}s, ~{remaining:.0f}s left"
 
 
 def _style(text, code, stream=None):
@@ -205,8 +253,11 @@ def process_jpg_file(
     delete=False,
     root_dir=None,
     quarantine_dir=None,
+    threshold=MIN_HASH_SIMILARITY,
+    report_rows=None,
 ):
     best_similarity = None
+    best_nef = None
 
     # ⚡ Bolt: Cache the JPG hash to avoid recalculating it for every NEF file
     # This turns O(N) expensive image loads/hashes into O(1) for the JPG
@@ -234,12 +285,15 @@ def process_jpg_file(
 
         if best_similarity is None or similarity > best_similarity:
             best_similarity = similarity
-        if similarity >= MIN_HASH_SIMILARITY:
+            best_nef = nef_path
+        if similarity >= threshold:
             break
 
-    if best_similarity is not None and best_similarity >= MIN_HASH_SIMILARITY:
+    if best_similarity is not None and best_similarity >= threshold:
         if dry_run:
             verb = "delete" if delete else "quarantine"
+            if report_rows is not None:
+                report_rows.append((jpg_path, best_nef or "", f"{best_similarity:.4f}", f"dry-run-{verb}", jpg_size))
             return f"[DRY-RUN] Would {verb}: {jpg_path} (perceptual hash similarity: {best_similarity:.2%})", True, jpg_size
         try:
             if _is_reparse_point(jpg_path):
@@ -247,15 +301,19 @@ def process_jpg_file(
             if delete:
                 os.remove(jpg_path)
                 action_msg = f"Deleted: {jpg_path}"
+                action_name = "deleted"
             else:
                 dest_path = _quarantine_file(jpg_path, root_dir, quarantine_dir)
                 action_msg = f"Quarantined: {jpg_path} -> {dest_path}"
+                action_name = "quarantined"
         except OSError as e:
             # Always return the error to be logged (even if not verbose,
             # errors during deletion/quarantine are important)
             verb = "delete" if delete else "quarantine"
             return f"Error: Failed to {verb} {jpg_path}: {e}", False, 0
 
+        if report_rows is not None:
+            report_rows.append((jpg_path, best_nef or "", f"{best_similarity:.4f}", action_name, jpg_size))
         if verbose:
             return f"{action_msg} (perceptual hash similarity: {best_similarity:.2%})", True, jpg_size
         return None, True, jpg_size
@@ -268,7 +326,7 @@ def process_jpg_file(
 
     return None, False, 0
 
-def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None):
+def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None, threshold=MIN_HASH_SIMILARITY, report_rows=None):
     # ⚡ Bolt: Cache NEF hashes across JPGs sharing the same prefix in a directory
     nef_hash_cache = {} if len(jpg_paths) > 1 else None
     results = []
@@ -283,12 +341,15 @@ def process_prefix_group(jpg_paths, nef_paths, verbose, dry_run=False, delete=Fa
                 delete=delete,
                 root_dir=root_dir,
                 quarantine_dir=quarantine_dir,
+                threshold=threshold,
+                report_rows=report_rows,
             )
         )
     return results
 
-def process_prefix_batch(batch, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None):
+def process_prefix_batch(batch, verbose, dry_run=False, delete=False, root_dir=None, quarantine_dir=None, threshold=MIN_HASH_SIMILARITY, collect_report=False):
     batch_results = []
+    batch_records = [] if collect_report else None
     for group_jpgs, nef_paths in batch:
         batch_results.extend(
             process_prefix_group(
@@ -299,11 +360,22 @@ def process_prefix_batch(batch, verbose, dry_run=False, delete=False, root_dir=N
                 delete=delete,
                 root_dir=root_dir,
                 quarantine_dir=quarantine_dir,
+                threshold=threshold,
+                report_rows=batch_records,
             )
         )
-    return batch_results
+    return (batch_results, batch_records) if collect_report else batch_results
 
-def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=False, quarantine_dir=None, return_stats=False):
+def delete_jpgs_with_nef_pairs(
+    directory,
+    verbose=False,
+    dry_run=False,
+    delete=False,
+    quarantine_dir=None,
+    return_stats=False,
+    threshold=MIN_HASH_SIMILARITY,
+    report_rows=None,
+):
     root_dir = os.path.abspath(directory)
     reparse_root = _validate_no_reparse_lineage(root_dir)
     if reparse_root:
@@ -331,6 +403,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
     reclaimed_bytes = 0
     error_count = 0
     scanned_dirs = 0
+    skipped_dirs = 0
     total_nefs = 0
     total_jpgs = 0
     work_items = []
@@ -342,6 +415,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
             with os.scandir(current_dir) as it:
                 entries = list(it)
         except OSError:
+            skipped_dirs += 1
             continue
         scanned_dirs += 1
 
@@ -389,10 +463,16 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
 
     if not work_items:
         print(f"Scanned {scanned_dirs} folder(s) ({total_nefs} NEF(s), {total_jpgs} JPG(s)): no matching NEF/JPG prefix pairs found.")
+        if skipped_dirs > 0:
+            print(_style(f"Skipped inaccessible folders: {skipped_dirs}", "33", sys.stderr), file=sys.stderr)
         return (0, 0, 0) if return_stats else 0
 
     total_candidate_jpgs = sum(len(group_jpgs) for group_jpgs, _ in work_items)
     print(f"Scanned {scanned_dirs} folder(s): found {total_candidate_jpgs} candidate JPG(s) across {len(work_items)} NEF prefix group(s).")
+    if skipped_dirs > 0:
+        print(_style(f"Skipped inaccessible folders: {skipped_dirs}", "33", sys.stderr), file=sys.stderr)
+
+    work_start = time.monotonic()
 
     # ⚡ Bolt: Avoid ProcessPoolExecutor spawn + heavy scientific import overhead (~0.45s/worker on Windows) for small workloads
     if len(work_items) < 16:
@@ -406,6 +486,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 delete=delete,
                 root_dir=root_dir,
                 quarantine_dir=quarantine_dir_abs,
+                threshold=threshold,
+                report_rows=report_rows,
             ):
                 if _emit_worker_message(msg):
                     error_count += 1
@@ -413,7 +495,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                     deleted_count += 1
                     reclaimed_bytes += item_bytes
             if total_groups >= 4 and (idx % 4 == 0 or idx == total_groups):
-                print(f"Progress: {idx}/{total_groups} group(s) checked...")
+                eta = _format_eta(time.monotonic() - work_start, idx, total_groups)
+                print(f"Progress: {idx}/{total_groups} group(s) checked ({eta})...")
         return (deleted_count, reclaimed_bytes, error_count) if return_stats else deleted_count
 
     # ⚡ Bolt: Dynamically scale batch size so medium workloads distribute across available CPU cores
@@ -423,6 +506,7 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
     total_batches = len(batches)
     max_workers = min(cpu_count, total_batches)
     progress_step = 1 if total_batches < 10 else 10
+    collect_report = report_rows is not None
 
     executor = concurrent.futures.ProcessPoolExecutor(
         max_workers=max_workers,
@@ -438,12 +522,21 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 delete=delete,
                 root_dir=root_dir,
                 quarantine_dir=quarantine_dir_abs,
+                threshold=threshold,
+                collect_report=collect_report,
             )
             for batch in batches
         ]
         for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
             try:
-                for msg, deleted, item_bytes in future.result():
+                batch_out = future.result()
+                if collect_report:
+                    batch_results, batch_records = batch_out
+                    if batch_records:
+                        report_rows.extend(batch_records)
+                else:
+                    batch_results = batch_out
+                for msg, deleted, item_bytes in batch_results:
                     if _emit_worker_message(msg):
                         error_count += 1
                     if deleted:
@@ -454,7 +547,8 @@ def delete_jpgs_with_nef_pairs(directory, verbose=False, dry_run=False, delete=F
                 print(_style(f"Error processing a file pair: {e}", "31", sys.stderr), file=sys.stderr)
             if completed % progress_step == 0 or completed == total_batches:
                 pct = (completed / total_batches) * 100
-                print(f"Progress: {completed}/{total_batches} batch(es) checked ({pct:.0f}%)...")
+                eta = _format_eta(time.monotonic() - work_start, completed, total_batches)
+                print(f"Progress: {completed}/{total_batches} batch(es) checked ({pct:.0f}%, {eta})...")
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         raise
@@ -507,7 +601,30 @@ def main():
         action="store_true",
         help="Confirm permanent deletion when --delete is specified",
     )
+    parser.add_argument(
+        "-t",
+        "--threshold",
+        type=float,
+        default=MIN_HASH_SIMILARITY,
+        help=f"Minimum perceptual-hash similarity between 0.50 and 1.00 (default: {MIN_HASH_SIMILARITY:.2f})",
+    )
+    parser.add_argument(
+        "--report",
+        help="Optional CSV file path to export matched JPG/NEF pairs and actions",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI color output",
+    )
     args = parser.parse_args()
+
+    global _FORCE_NO_COLOR
+    if args.no_color:
+        _FORCE_NO_COLOR = True
+
+    if not (0.5 <= args.threshold <= 1.0):
+        parser.error("--threshold must be between 0.50 and 1.00.")
 
     if not os.path.isdir(args.folder):
         parser.error(f"not a folder: {args.folder}")
@@ -517,6 +634,18 @@ def main():
 
     if args.delete and not args.yes and not args.dry_run:
         parser.error("--delete requires --yes to permanently delete files without quarantine.")
+
+    report_path_abs = None
+    if args.report:
+        report_path_abs = os.path.abspath(args.report)
+        report_dir = os.path.dirname(report_path_abs) or os.getcwd()
+        reparse_report = _validate_no_reparse_lineage(report_path_abs)
+        if reparse_report:
+            parser.error(f"report path must not be or traverse a symlink or junction: {reparse_report}")
+        if os.path.isdir(report_path_abs):
+            parser.error(f"report path is an existing directory: {report_path_abs}")
+        if not os.path.isdir(report_dir):
+            parser.error(f"report parent directory does not exist: {report_dir}")
 
     effective_quarantine = (
         args.quarantine
@@ -537,7 +666,7 @@ def main():
             parser.error(f"quarantine path exists and is not a folder: {effective_quarantine_abs}")
 
     try:
-        print(f"Scan folder: {os.path.abspath(args.folder)} (similarity threshold: {MIN_HASH_SIMILARITY:.0%})")
+        print(f"Scan folder: {os.path.abspath(args.folder)} (similarity threshold: {args.threshold:.0%})")
         if args.dry_run:
             print(_style("Mode: DRY-RUN (preview only — no files will be modified)", "33"))
         elif args.delete:
@@ -545,6 +674,7 @@ def main():
         else:
             print(_style(f"Mode: QUARANTINE -> {os.path.abspath(effective_quarantine)}", "36"))
         start_time = time.monotonic()
+        report_rows = [] if report_path_abs else None
         processed_count, reclaimed_bytes, error_count = delete_jpgs_with_nef_pairs(
             args.folder,
             verbose=args.verbose,
@@ -552,6 +682,8 @@ def main():
             delete=args.delete,
             quarantine_dir=args.quarantine,
             return_stats=True,
+            threshold=args.threshold,
+            report_rows=report_rows,
         )
         elapsed = time.monotonic() - start_time
         if args.dry_run:
@@ -561,10 +693,26 @@ def main():
         print(
             _style(
                 f"{action_word} {processed_count} .jpg file(s) ({format_bytes(reclaimed_bytes)}) with at least "
-                f"{MIN_HASH_SIMILARITY:.0%} perceptual-hash similarity ({elapsed:.2f}s).",
+                f"{args.threshold:.0%} perceptual-hash similarity ({elapsed:.2f}s).",
                 "32" if processed_count > 0 else "36",
             )
         )
+        if report_path_abs and report_rows:
+            try:
+                with open(report_path_abs, "w", newline="", encoding="utf-8") as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(["jpg_path", "matched_nef", "similarity", "action", "size_bytes"])
+                    for jpg_p, nef_p, sim, act, sz in report_rows:
+                        writer.writerow([
+                            _safe_csv_field(jpg_p),
+                            _safe_csv_field(nef_p),
+                            sim,
+                            act,
+                            sz,
+                        ])
+                print(f"Report saved to   : {report_path_abs}")
+            except OSError as e:
+                print(_style(f"Warning: Failed to write report {report_path_abs}: {e}", "33", sys.stderr), file=sys.stderr)
         if error_count > 0:
             print(_style(f"Errors / skipped: {error_count}", "33", sys.stderr), file=sys.stderr)
         if not args.delete and processed_count > 0 and effective_quarantine:
